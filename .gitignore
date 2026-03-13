@@ -1,0 +1,17 @@
+# Runtime data - DELETE THIS FOLDER TO RESET CHETNA
+ChetnaData/
+
+# Legacy data folder (if exists)
+data/
+
+# Logs
+*.log
+
+# Build artifacts
+target/
+
+# macOS
+.DS_Store
+
+# Backup files
+*.backup
