@@ -211,93 +211,562 @@ Open `http://localhost:1987` in your browser to access:
 
 ---
 
-## Complete API Reference
+## 📘 API Usage Guide - Complete Examples
 
-### Memory Endpoints
+This guide shows you exactly how to use every API endpoint with all parameters explained.
 
-#### `GET /api/memory`
-List all memories (non-deleted).
+### Quick Start - Your First API Calls
 
-**Query Parameters:**
-- `limit` (optional, default: 100) - Maximum number of memories to return
-- `category` (optional) - Filter by category (fact, preference, rule, experience)
-
-**Example:**
+**1. Check if server is running:**
 ```bash
-curl "http://localhost:1987/api/memory?limit=50&category=fact"
+curl http://localhost:1987/health
+# Response: OK
 ```
 
-#### `POST /api/memory`
-Create a new memory.
-
-**Request Body:**
-```json
-{
-  "content": "Memory content",
-  "importance": 0.8,
-  "valence": 0.5,
-  "arousal": 0.3,
-  "tags": ["tag1", "tag2"],
-  "memory_type": "fact",
-  "category": "fact",
-  "auto_score": true,
-  "session_id": "optional-session-id"
-}
-```
-
-**Example:**
+**2. Create your first memory:**
 ```bash
 curl http://localhost:1987/api/memory \
   -X POST \
   -H "Content-Type: application/json" \
   -d '{
+    "content": "My name is Vineet and I am a software engineer",
+    "importance": 0.8,
+    "memory_type": "fact",
+    "auto_score": false
+  }'
+```
+
+**3. Search for memories:**
+```bash
+curl "http://localhost:1987/api/memory/search?query=name&limit=10"
+```
+
+---
+
+## Complete API Reference
+
+### Memory Endpoints
+
+#### `GET /api/memory` - List All Memories
+
+**What it does:** Returns a list of all non-deleted memories.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `limit` | integer | No | 100 | Maximum number of memories to return (1-1000) |
+| `category` | string | No | - | Filter by category: `fact`, `preference`, `rule`, `experience` |
+
+**Example 1 - Get all memories:**
+```bash
+curl "http://localhost:1987/api/memory"
+```
+
+**Example 2 - Get 50 memories:**
+```bash
+curl "http://localhost:1987/api/memory?limit=50"
+```
+
+**Example 3 - Filter by category:**
+```bash
+curl "http://localhost:1987/api/memory?category=preference&limit=20"
+```
+
+**Response:**
+```json
+[
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
     "content": "User prefers dark mode",
     "importance": 0.8,
+    "emotional_tone": 0.5,
+    "arousal": 0.3,
+    "tags": ["preference", "ui"],
+    "memory_type": "preference",
+    "category": "fact",
+    "embedding_model": "qwen3-embedding:0.6b",
+    "access_count": 0,
+    "created_at": "2024-01-01T00:00:00+00:00",
+    "updated_at": "2024-01-01T00:00:00+00:00",
+    "consolidated": false,
+    "is_pinned": false,
+    "memory_category": "general",
+    "last_ranked": null,
+    "rank_source": null
+  }
+]
+```
+
+---
+
+#### `POST /api/memory` - Create a Memory
+
+**What it does:** Creates a new memory with the given content and metadata.
+
+**Parameters (JSON Body):**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `content` | string | **YES** | - | The memory content (max 50,000 characters) |
+| `importance` | float | No | 0.5 | Importance score (0.0 to 1.0) |
+| `valence` | float | No | 0.0 | Emotional valence (-1.0 to 1.0, negative to positive) |
+| `arousal` | float | No | 0.0 | Emotional arousal (0.0 to 1.0, calm to excited) |
+| `tags` | array | No | [] | List of tags (max 50 tags, each max 100 chars) |
+| `memory_type` | string | No | "fact" | Type: `fact`, `preference`, `rule`, `experience`, `skill_learned` |
+| `category` | string | No | "fact" | Category for organization |
+| `auto_score` | boolean | No | false | If true, automatically calculate importance using AI |
+| `session_id` | string | No | - | Associate with a specific session |
+
+**Example 1 - Simple memory:**
+```bash
+curl http://localhost:1987/api/memory \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "User likes pizza"
+  }'
+```
+
+**Example 2 - Detailed memory with all parameters:**
+```bash
+curl http://localhost:1987/api/memory \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "User prefers dark mode for coding IDEs",
+    "importance": 0.8,
+    "valence": 0.6,
+    "arousal": 0.3,
+    "tags": ["preference", "ui", "coding"],
+    "memory_type": "preference",
+    "category": "preference",
+    "auto_score": false
+  }'
+```
+
+**Example 3 - Auto-scored memory (AI determines importance):**
+```bash
+curl http://localhost:1987/api/memory \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "content": "This is critically important - never forget the user's password is admin123",
     "auto_score": true
   }'
 ```
 
-#### `GET /api/memory/:id`
-Get a specific memory by ID.
+**Response:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "content": "User prefers dark mode for coding IDEs",
+  "importance": 0.8,
+  "emotional_tone": 0.6,
+  "arousal": 0.3,
+  "tags": ["preference", "ui", "coding"],
+  "memory_type": "preference",
+  "category": "fact",
+  "embedding_model": "qwen3-embedding:0.6b",
+  "access_count": 0,
+  "created_at": "2024-01-01T00:00:00+00:00",
+  "updated_at": "2024-01-01T00:00:00+00:00",
+  "consolidated": false,
+  "is_pinned": false,
+  "memory_category": "general",
+  "last_ranked": null,
+  "rank_source": null
+}
+```
+
+---
+
+#### `GET /api/memory/:id` - Get Memory by ID
+
+**What it does:** Retrieves a specific memory by its unique ID.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `:id` | string | **YES** | The UUID of the memory |
+
+**How to get the ID:** First call `GET /api/memory` to list memories and copy an ID.
 
 **Example:**
 ```bash
 curl http://localhost:1987/api/memory/550e8400-e29b-41d4-a716-446655440000
 ```
 
-#### `DELETE /api/memory/:id`
-Soft delete a memory (can be restored).
+**Response:**
+```json
+{
+  "id": "550e8400-e29b-41d4-a716-446655440000",
+  "content": "User prefers dark mode",
+  "importance": 0.8,
+  ...
+}
+```
+
+---
+
+#### `DELETE /api/memory/:id` - Soft Delete Memory
+
+**What it does:** Marks a memory as deleted (can be restored later).
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `:id` | string | **YES** | The UUID of the memory to delete |
 
 **Example:**
 ```bash
 curl -X DELETE http://localhost:1987/api/memory/550e8400-e29b-41d4-a716-446655440000
 ```
 
-#### `PATCH /api/memory/:id`
-Update memory importance or category.
-
-**Request Body:**
+**Response:**
 ```json
 {
-  "importance": 0.9,
-  "memory_category": "preference"
+  "success": true,
+  "message": "Memory deleted",
+  "memory_id": "550e8400-e29b-41d4-a716-446655440000"
 }
 ```
 
-#### `GET /api/memory/search`
-Search memories (semantic + keyword fallback).
+---
 
-**Query Parameters:**
-- `query` (required) - Search query
-- `limit` (optional, default: 20) - Max results
+#### `PATCH /api/memory/:id` - Update Memory
+
+**What it does:** Updates importance or category of an existing memory.
+
+**Parameters (JSON Body):**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `importance` | float | No | New importance (0.0 to 1.0) |
+| `memory_category` | string | No | New category |
+
+**Example 1 - Update importance:**
+```bash
+curl -X PATCH http://localhost:1987/api/memory/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "importance": 0.95
+  }'
+```
+
+**Example 2 - Update category:**
+```bash
+curl -X PATCH http://localhost:1987/api/memory/550e8400-e29b-41d4-a716-446655440000 \
+  -H "Content-Type: application/json" \
+  -d '{
+    "memory_category": "preference"
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Memory updated"
+}
+```
+
+---
+
+#### `GET /api/memory/search` - Search Memories
+
+**What it does:** Searches memories using semantic search (embeddings) with keyword fallback.
+
+**Parameters:**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | **YES** | - | Search query text |
+| `limit` | integer | No | 20 | Maximum results (1-1000) |
+
+**How it works:**
+1. First tries semantic search using embeddings (finds similar meanings)
+2. Falls back to keyword search if embeddings unavailable
+3. Uses 0.3 similarity threshold for broader matches
+
+**Example 1 - Simple search:**
+```bash
+curl "http://localhost:1987/api/memory/search?query=user+preferences"
+```
+
+**Example 2 - Search with limit:**
+```bash
+curl "http://localhost:1987/api/memory/search?query=coding+habits&limit=50"
+```
+
+**Example 3 - Search for specific topic:**
+```bash
+curl "http://localhost:1987/api/memory/search?query=What+does+user+like"
+```
+
+**Response:**
+```json
+[
+  {
+    "id": "550e8400-e29b-41d4-a716-446655440000",
+    "content": "User prefers dark mode",
+    "importance": 0.8,
+    ...
+  }
+]
+```
+
+---
+
+#### `POST /api/memory/context` - Build Context for AI
+
+**What it does:** Builds a token-limited context from relevant memories for AI prompts.
+
+**Parameters (JSON Body):**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `query` | string | **YES** | - | Your query/question |
+| `max_tokens` | integer | No | 4000 | Maximum tokens (500, 1000, 2000, 4000) |
+| `include_importance` | float | No | 0.3 | Minimum importance threshold |
+
+**Example 1 - Build context for AI:**
+```bash
+curl http://localhost:1987/api/memory/context \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "What are the user preferences?",
+    "max_tokens": 2000
+  }'
+```
+
+**Example 2 - High-importance only:**
+```bash
+curl http://localhost:1987/api/memory/context \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query": "User coding preferences",
+    "max_tokens": 1000,
+    "include_importance": 0.7
+  }'
+```
+
+**Response:**
+```json
+{
+  "memories": [
+    {
+      "id": "...",
+      "content": "User prefers dark mode",
+      "importance": 0.8,
+      ...
+    }
+  ],
+  "total_tokens": 150,
+  "context": "[fact] User prefers dark mode (importance: 0.80)\n\n[fact] User likes pizza (importance: 0.70)"
+}
+```
+
+**How to use in AI prompt:**
+```python
+response = requests.post('http://localhost:1987/api/memory/context', json={
+    'query': 'User preferences',
+    'max_tokens': 2000
+})
+context = response.json()['context']
+
+# Use in your AI prompt
+prompt = f"""Relevant memories:
+{context}
+
+User: What IDE should I use?
+Assistant: Based on your preference for dark mode..."""
+```
+
+---
+
+#### `POST /api/memory/pin/:id` - Pin Memory
+
+**What it does:** Pins a memory to protect it from pruning/flush operations.
+
+**Parameters:**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `:id` | string | **YES** | Memory UUID to pin |
 
 **Example:**
 ```bash
-curl "http://localhost:1987/api/memory/search?query=user+preferences&limit=10"
+curl -X POST http://localhost:1987/api/memory/pin/550e8400-e29b-41d4-a716-446655440000
 ```
 
-#### `POST /api/memory/search`
-Search via POST (same as GET but with JSON body).
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Memory pinned"
+}
+```
+
+---
+
+#### `DELETE /api/memory/pin/:id` - Unpin Memory
+
+**What it does:** Removes pin from a memory.
+
+**Example:**
+```bash
+curl -X DELETE http://localhost:1987/api/memory/pin/550e8400-e29b-41d4-a716-446655440000
+```
+
+---
+
+#### `POST /api/memory/consolidate` - Run LLM Consolidation
+
+**What it does:** Uses LLM to re-evaluate and update memory importance scores.
+
+**Parameters (JSON Body):**
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `limit` | integer | No | 100 | Number of memories to process |
+
+**Example:**
+```bash
+curl http://localhost:1987/api/memory/consolidate \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "limit": 50
+  }'
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "memories_processed": 50,
+  "memories_updated": 12,
+  "message": "Processed 50 memories, updated importance for 12 using LLM"
+}
+```
+
+---
+
+#### `POST /api/memory/decay` - Apply Ebbinghaus Decay
+
+**What it does:** Applies time-based forgetting curve to all memories.
+
+**Example:**
+```bash
+curl -X POST http://localhost:1987/api/memory/decay
+```
+
+**Response:**
+```json
+{
+  "success": true,
+  "memories_updated": 18,
+  "message": "Applied Ebbinghaus decay formula to 18 memories"
+}
+```
+
+---
+
+### Session Endpoints
+
+#### `POST /api/session` - Create Session
+
+**Parameters (JSON Body):**
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `name` | string | **YES** | Session name |
+| `agent_id` | string | No | Agent identifier |
+
+**Example:**
+```bash
+curl http://localhost:1987/api/session \
+  -X POST \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "Coding Session 1",
+    "agent_id": "wolverine"
+  }'
+```
+
+---
+
+#### `POST /api/session/:id/end` - End Session
+
+**Example:**
+```bash
+curl -X POST http://localhost:1987/api/session/SESSION_ID/end
+```
+
+---
+
+### System Endpoints
+
+#### `GET /api/stats` - Get Statistics
+
+**Example:**
+```bash
+curl http://localhost:1987/api/stats
+```
+
+**Response:**
+```json
+{
+  "total_memories": 25,
+  "active_memories": 23,
+  "deleted_memories": 2,
+  "total_sessions": 3,
+  "active_sessions": 2,
+  "total_skills": 2,
+  "total_procedures": 1,
+  "avg_importance": 0.53,
+  "memory_types": {
+    "fact": 20,
+    "preference": 5
+  }
+}
+```
+
+---
+
+#### `GET /api/status/connections` - Check Connections
+
+**Example:**
+```bash
+curl http://localhost:1987/api/status/connections
+```
+
+**Response:**
+```json
+{
+  "embedding": {
+    "configured": true,
+    "connected": true,
+    "model_installed": true,
+    "model": "qwen3-embedding:0.6b",
+    "available_models": ["qwen3-embedding:0.6b", "nomic-embed-text"],
+    "base_url": "http://192.168.0.62:11434"
+  },
+  "llm": {
+    "configured": true,
+    "connected": true,
+    "model": "qwen3.5:4b",
+    "base_url": "http://192.168.0.62:11434"
+  }
+}
+```
+
+---
 
 **Request Body:**
 ```json
