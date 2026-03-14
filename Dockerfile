@@ -10,8 +10,14 @@ RUN apt-get update && apt-get install -y \
 # Create app directory
 WORKDIR /app
 
-# Copy source files
-COPY Cargo.toml Cargo.lock ./
+# Copy Cargo files first for dependency caching
+COPY Cargo.toml ./
+
+# Create a dummy Cargo.lock if it doesn't exist
+# (This allows building even without lockfile)
+RUN touch Cargo.lock
+
+# Copy source
 COPY src ./src
 
 # Build release binary
@@ -24,6 +30,7 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Create app user
@@ -34,9 +41,6 @@ WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /app/target/release/chetna /app/chetna
-
-# Copy config template
-COPY ChetnaData/config.json.template /app/ChetnaData/config.json.template 2>/dev/null || true
 
 # Create data directory
 RUN mkdir -p /app/ChetnaData && chown -R appuser:appuser /app
