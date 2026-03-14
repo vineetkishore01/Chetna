@@ -24,7 +24,7 @@ services:
       - CHETNA_DB_PATH=./ChetnaData/chetna.db
       
       # Consolidation Settings (optional)
-      - CONSOLATION_INTERVAL=6
+      - CONSOLIDATION_INTERVAL=6
       - AUTO_DECAY_ENABLED=true
       - AUTO_FLUSH_ENABLED=true
       - MIN_IMPORTANCE_THRESHOLD=0.1
