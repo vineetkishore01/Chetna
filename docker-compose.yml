@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  chetna:
+    image: ghcr.io/vineetkishore01/chetna:latest
+    container_name: chetna
+    restart: unless-stopped
+    ports:
+      - "1987:1987"
+    volumes:
+      - ./ChetnaData:/app/ChetnaData
+    environment:
+      # Ollama Configuration
+      # IMPORTANT: Change this to your Ollama server IP
+      - EMBEDDING_BASE_URL=http://host.docker.internal:11434
+      - LLM_BASE_URL=http://host.docker.internal:11434
+      
+      # Model Configuration
+      - EMBEDDING_MODEL=qwen3-embedding:4b
+      - LLM_MODEL=qwen3.5:4b
+      
+      # Server Configuration
+      - CHETNA_PORT=1987
+      - CHETNA_DB_PATH=./ChetnaData/chetna.db
+      
+      # Consolidation Settings (optional)
+      - CONSOLATION_INTERVAL=6
+      - AUTO_DECAY_ENABLED=true
+      - AUTO_FLUSH_ENABLED=true
+      - MIN_IMPORTANCE_THRESHOLD=0.1
+      
+      # Security (optional - uncomment and set your key)
+      # - CHETNA_API_KEY=your_secret_key_here
+    extra_hosts:
+      # This allows Docker to resolve host.docker.internal on Linux
+      - "host.docker.internal:host-gateway"
+
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:1987/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+    networks:
+      - chetna-network
+
+networks:
+  chetna-network:
+    driver: bridge

@@ -1,4 +1,6 @@
 //! Authentication middleware for Chetna API
+//!
+//! Provides optional API key authentication for securing the service.
 
 use axum::{
     extract::Request,
@@ -8,7 +10,15 @@ use axum::{
     response::Response,
 };
 
-pub async fn api_key_auth(mut req: Request, next: Next) -> Result<Response, StatusCode> {
+pub async fn api_key_auth(req: Request, next: Next) -> Result<Response, StatusCode> {
+    let uri = req.uri();
+    
+    // Skip auth for health check, root, and static content
+    let public_paths = ["/health", "/", "/memories", "/skills", "/sessions", "/settings"];
+    if public_paths.iter().any(|p| uri.path() == *p) {
+        return Ok(next.run(req).await);
+    }
+    
     // Check for API key in header
     let api_key = req
         .headers()
@@ -17,23 +27,26 @@ pub async fn api_key_auth(mut req: Request, next: Next) -> Result<Response, Stat
         .and_then(|v| v.strip_prefix("Bearer "))
         .map(|s| s.to_string());
 
-    // If no API key provided, check query param as fallback
-    if api_key.is_none() {
-        if let Some(query_key) = axum::extract::Query::<std::collections::HashMap<String, String>>::from_request(req.extensions().get::<axum::extract::State<()>>().cloned().unwrap_or_default(), &mut req).await.ok() {
-            if let Some(key) = query_key.get("api_key") {
-                api_key.clone_from(&Some(key.clone()));
-            }
+    // Get configured API key from extensions
+    let configured_key = req
+        .extensions()
+        .get::<String>()
+        .cloned();
+
+    // If no API key is configured, allow all requests (development mode)
+    if configured_key.is_none() {
+        return Ok(next.run(req).await);
+    }
+
+    // Validate API key
+    if let Some(key) = api_key {
+        if key == configured_key.unwrap() {
+            return Ok(next.run(req).await);
         }
     }
 
-    // For now, we allow requests without API key in development
-    // In production, you would validate against configured API keys
-    if let Some(key) = api_key {
-        // Store the API key in extensions for logging/auditing
-        req.extensions_mut().insert(key);
-    }
-
-    Ok(next.run(req).await)
+    // Invalid or missing API key
+    Err(StatusCode::UNAUTHORIZED)
 }
 
 pub fn check_api_key(request_key: Option<&str>, configured_key: Option<&str>) -> bool {

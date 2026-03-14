@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
 
     // Start background scheduler if consolidation is enabled
     if config.consolidation_interval_hours > 0 {
-        let scheduler = Scheduler::new(state.brain.clone(), config.clone());
+        let scheduler = Scheduler::new(state.brain.clone(), state.user_config.clone());
         scheduler.start().await;
         info!("   Scheduler: enabled (every {} hours)", config.consolidation_interval_hours);
     } else {

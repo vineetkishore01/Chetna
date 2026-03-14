@@ -48,6 +48,21 @@ pub struct BatchMemoryRequest {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct BatchMemoryResponse {
+    pub created: Vec<MemoryResponse>,
+    pub failed: Vec<BatchMemoryError>,
+    pub total: usize,
+    pub success_count: usize,
+    pub failure_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchMemoryError {
+    pub index: usize,
+    pub error: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryResponse {
     pub id: String,
     pub content: String,
@@ -175,9 +190,13 @@ async fn create_memory(
 
     let (importance, valence, arousal) = if auto_score && brain.has_embedder() {
         let scores = brain.auto_score_importance(&req.content).await.unwrap_or((0.5, 0.0, 0.0));
-        (scores.0, scores.1, scores.2)
+        (scores.0.clamp(0.0, 1.0), scores.1.clamp(-1.0, 1.0), scores.2.clamp(0.0, 1.0))
     } else {
-        (req.importance.unwrap_or(0.5), req.valence.unwrap_or(0.0), req.arousal.unwrap_or(0.0))
+        (
+            req.importance.unwrap_or(0.5).clamp(0.0, 1.0),
+            req.valence.unwrap_or(0.0).clamp(-1.0, 1.0),
+            req.arousal.unwrap_or(0.0).clamp(0.0, 1.0)
+        )
     };
 
     let id = brain.create_memory(
@@ -219,28 +238,51 @@ async fn create_memory(
 async fn create_memories_batch(
     State((brain, _, _)): State<(Arc<Brain>, Arc<SessionCache>, Arc<tokio::sync::RwLock<UserConfig>>)>,
     Json(req): Json<BatchMemoryRequest>,
-) -> Result<Json<Vec<MemoryResponse>>, StatusCode> {
+) -> Result<Json<BatchMemoryResponse>, StatusCode> {
     let mut results = Vec::new();
+    let mut failures = Vec::new();
 
-    for mem_req in req.memories {
+    for (index, mem_req) in req.memories.iter().enumerate() {
         // Input validation
         if mem_req.content.trim().is_empty() {
+            failures.push(BatchMemoryError {
+                index,
+                error: "Memory content cannot be empty".to_string(),
+            });
             continue;
         }
         if mem_req.content.len() > MAX_CONTENT_LENGTH {
+            failures.push(BatchMemoryError {
+                index,
+                error: format!("Memory content exceeds maximum length of {} characters", MAX_CONTENT_LENGTH),
+            });
             continue;
         }
         if let Some(ref tags) = mem_req.tags {
             if tags.len() > MAX_TAGS {
+                failures.push(BatchMemoryError {
+                    index,
+                    error: format!("Too many tags (max {})", MAX_TAGS),
+                });
                 continue;
+            }
+            for tag in tags {
+                if tag.len() > MAX_TAG_LENGTH {
+                    failures.push(BatchMemoryError {
+                        index,
+                        error: format!("Tag '{}' exceeds maximum length of {} characters", tag, MAX_TAG_LENGTH),
+                    });
+                    continue;
+                }
             }
         }
 
-        let importance = mem_req.importance.unwrap_or(0.5);
-        let valence = mem_req.valence.unwrap_or(0.0);
-        let arousal = mem_req.arousal.unwrap_or(0.0);
+        // Clamp importance, valence, arousal to valid ranges
+        let importance = mem_req.importance.unwrap_or(0.5).clamp(0.0, 1.0);
+        let valence = mem_req.valence.unwrap_or(0.0).clamp(-1.0, 1.0);
+        let arousal = mem_req.arousal.unwrap_or(0.0).clamp(0.0, 1.0);
 
-        let id = brain.create_memory(
+        match brain.create_memory(
             &mem_req.content,
             importance,
             valence,
@@ -249,32 +291,49 @@ async fn create_memories_batch(
             mem_req.memory_type.as_deref().unwrap_or("fact"),
             mem_req.category.as_deref().unwrap_or("fact"),
             mem_req.session_id.as_deref(),
-        ).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-        if let Ok(memory) = brain.get_memory(&id).await {
-            results.push(MemoryResponse {
-                id: memory.id,
-                content: memory.content,
-                importance: memory.importance,
-                emotional_tone: memory.emotional_tone,
-                arousal: memory.arousal,
-                tags: memory.tags,
-                memory_type: memory.memory_type,
-                category: memory.category,
-                embedding_model: memory.embedding_model,
-                access_count: memory.access_count,
-                created_at: memory.created_at,
-                updated_at: memory.updated_at,
-                consolidated: memory.consolidated,
-                is_pinned: memory.is_pinned,
-                memory_category: memory.memory_category,
-                last_ranked: memory.last_ranked,
-                rank_source: memory.rank_source,
-            });
+        ).await {
+            Ok(id) => {
+                if let Ok(memory) = brain.get_memory(&id).await {
+                    results.push(MemoryResponse {
+                        id: memory.id,
+                        content: memory.content,
+                        importance: memory.importance,
+                        emotional_tone: memory.emotional_tone,
+                        arousal: memory.arousal,
+                        tags: memory.tags,
+                        memory_type: memory.memory_type,
+                        category: memory.category,
+                        embedding_model: memory.embedding_model,
+                        access_count: memory.access_count,
+                        created_at: memory.created_at,
+                        updated_at: memory.updated_at,
+                        consolidated: memory.consolidated,
+                        is_pinned: memory.is_pinned,
+                        memory_category: memory.memory_category,
+                        last_ranked: memory.last_ranked,
+                        rank_source: memory.rank_source,
+                    });
+                }
+            }
+            Err(e) => {
+                failures.push(BatchMemoryError {
+                    index,
+                    error: e.to_string(),
+                });
+            }
         }
     }
 
-    Ok(Json(results))
+    let success_count = results.len();
+    let failure_count = failures.len();
+
+    Ok(Json(BatchMemoryResponse {
+        created: results,
+        failed: failures,
+        total: req.memories.len(),
+        success_count,
+        failure_count,
+    }))
 }
 
 async fn delete_memory(

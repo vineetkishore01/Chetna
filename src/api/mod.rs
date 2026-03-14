@@ -4,6 +4,7 @@ pub mod skill;
 pub mod procedure;
 pub mod stats;
 pub mod config_api;
+pub mod auth;
 
 use axum::{extract::State, Router, routing::{get, post}, Json};
 use std::sync::Arc;
@@ -14,6 +15,8 @@ pub fn create_router(
     session_cache: Arc<SessionCache>,
     user_config: Arc<tokio::sync::RwLock<UserConfig>>,
 ) -> Router<(Arc<Brain>, Arc<SessionCache>, Arc<tokio::sync::RwLock<UserConfig>>)> {
+    let state = (brain.clone(), session_cache.clone(), user_config.clone());
+    
     Router::new()
         .route("/health", get(health))
         .nest("/api/memory", memory::router(brain.clone()))
@@ -35,7 +38,7 @@ pub fn create_router(
         .route("/api/status/connections", get(connection_status))
         .route("/api/config/user", get(get_user_config).post(set_user_config))
         .route("/mcp", get(mcp_list_tools).post(mcp_handle))
-        .with_state((brain, session_cache, user_config))
+        .with_state(state)
 }
 
 async fn health(State(_): State<(Arc<Brain>, Arc<SessionCache>, Arc<tokio::sync::RwLock<UserConfig>>)> ) -> &'static str {

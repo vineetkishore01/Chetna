@@ -536,13 +536,17 @@ loadConnectionStatus();
 }
 
 async fn memories_page() -> Html<String> {
-    Html(format!(r#"<!DOCTYPE html>
+    let html = [
+        r#"<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Memories - Chetna</title>
-<style>{STYLE}</style>
+<style>"#,
+        STYLE,
+        r#"</style>
 </head><body>
-{HEADER_HTML}
-<div class="container">
+"#,
+        HEADER_HTML,
+        r#"<div class="container">
     <div class="toolbar">
         <input type="text" class="search-box" id="searchBox" placeholder="Search memories... (press / to focus)">
         <button class="btn" onclick="showCreateModal()">+ New</button>
@@ -587,71 +591,71 @@ let allMemories = [], filteredMemories = [];
 const PAGE_SIZE = 20;
 let currentPage = 1;
 
-function showCreateModal() {{ document.getElementById('createModal').classList.remove('hidden'); }}
-function hideCreateModal() {{ document.getElementById('createModal').classList.add('hidden'); }}
+function showCreateModal() { document.getElementById('createModal').classList.remove('hidden'); }
+function hideCreateModal() { document.getElementById('createModal').classList.add('hidden'); }
 
-function renderPage(page) {{
+function renderPage(page) {
     const start = (page - 1) * PAGE_SIZE;
     const end = start + PAGE_SIZE;
     const items = filteredMemories.slice(start, end);
     const container = document.getElementById('memories');
     
-    if (items.length === 0) {{
+    if (items.length === 0) {
         container.innerHTML = '<div class="empty-state">' + (filteredMemories.length === 0 ? 'No memories yet' : 'No matches') + '</div>';
         document.getElementById('pagination').innerHTML = '';
         return;
-    }}
+    }
     
     container.innerHTML = items.map(m => `
         <div class="item-card">
             <div class="item-meta">
-                <span class="badge">${{m.importance.toFixed(2)}}</span>
-                <span class="badge">${{m.memory_type}}</span>
-                <span class="badge">${{m.category}}</span>
-                <span style="float:right">${{new Date(m.created_at).toLocaleDateString()}}</span>
+                <span class="badge">${m.importance.toFixed(2)}</span>
+                <span class="badge">${m.memory_type}</span>
+                <span class="badge">${m.category}</span>
+                <span style="float:right">${new Date(m.created_at).toLocaleDateString()}</span>
             </div>
-            <div class="item-content">${{escapeHtml(m.content)}}</div>
+            <div class="item-content">${escapeHtml(m.content)}</div>
             <div class="item-actions">
-                <button class="btn" onclick="togglePin('${{m.id}}', ${{!m.is_pinned}})">${{m.is_pinned ? 'Unpin' : 'Pin'}}</button>
-                <button class="btn btn-danger" onclick="deleteMemory('${{m.id}}')">Delete</button>
+                <button class="btn" onclick="togglePin('${m.id}', ${!m.is_pinned})">${m.is_pinned ? 'Unpin' : 'Pin'}</button>
+                <button class="btn btn-danger" onclick="deleteMemory('${m.id}')">Delete</button>
             </div>
         </div>
     `).join('');
     
     renderPagination(page);
-}}
+}
 
-function renderPagination(current) {{
+function renderPagination(current) {
     const total = Math.ceil(filteredMemories.length / PAGE_SIZE);
-    if (total <= 1) {{ document.getElementById('pagination').innerHTML = ''; return; }}
+    if (total <= 1) { document.getElementById('pagination').innerHTML = ''; return; }
     
     let html = '';
-    html += `<button class="page-btn" ${{current===1?'disabled':''}} onclick="goToPage(${{current-1}})">Prev</button>`;
-    for (let i = Math.max(1, current-2); i <= Math.min(total, current+2); i++) {{
-        html += `<button class="page-btn${{i===current?' active':''}}" onclick="goToPage(${{i}})">${{i}}</button>`;
-    }}
-    html += `<button class="page-btn" ${{current===total?'disabled':''}} onclick="goToPage(${{current+1}})">Next</button>`;
+    html += '<button class="page-btn"' + (current===1?'disabled':'') + ' onclick="goToPage(' + (current-1) + ')">Prev</button>';
+    for (let i = Math.max(1, current-2); i <= Math.min(total, current+2); i++) {
+        html += '<button class="page-btn' + (i===current?' active':'') + '" onclick="goToPage(' + i + ')">' + i + '</button>';
+    }
+    html += '<button class="page-btn"' + (current===total?'disabled':'') + ' onclick="goToPage(' + (current+1) + ')">Next</button>';
     document.getElementById('pagination').innerHTML = html;
-}}
+}
 
-function goToPage(p) {{ currentPage = p; renderPage(p); }}
-function escapeHtml(t) {{ const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }}
+function goToPage(p) { currentPage = p; renderPage(p); }
+function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
 
-async function loadMemories() {{
+async function loadMemories() {
     document.getElementById('memories').innerHTML = '<div class="loading">Loading...</div>';
-    try {{
+    try {
         const r = await fetch('/api/memory?limit=1000');
         if (!r.ok) throw new Error('HTTP ' + r.status);
         allMemories = await r.json();
         filteredMemories = [...allMemories];
         currentPage = 1;
         renderPage(1);
-    }} catch(e) {{
+    } catch(e) {
         document.getElementById('memories').innerHTML = '<div class="error-state">Error: ' + e.message + '</div>';
-    }}
-}}
+    }
+}
 
-function searchMemories(q) {{
+function searchMemories(q) {
     q = q.toLowerCase().trim();
     filteredMemories = q ? allMemories.filter(m => 
         m.content.toLowerCase().includes(q) || 
@@ -660,71 +664,78 @@ function searchMemories(q) {{
     ) : [...allMemories];
     currentPage = 1;
     renderPage(1);
-}}
+}
 
-async function createMemory() {{
+async function createMemory() {
     const content = document.getElementById('newContent').value.trim();
-    if (!content) {{ alert('Enter content'); return; }}
+    if (!content) { alert('Enter content'); return; }
     
-    try {{
-        const r = await fetch('/api/memory', {{
+    try {
+        const r = await fetch('/api/memory', {
             method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({
                 content: content,
                 memory_type: document.getElementById('newType').value,
                 importance: parseFloat(document.getElementById('newImportance').value)
-            }})
-        }});
+            })
+        });
         if (!r.ok) throw new Error('Failed');
         hideCreateModal();
         document.getElementById('newContent').value = '';
         loadMemories();
-    }} catch(e) {{ alert('Error: ' + e.message); }}
-}}
+    } catch(e) { alert('Error: ' + e.message); }
+}
 
-async function deleteMemory(id) {{
+async function deleteMemory(id) {
     if (!confirm('Delete this memory?')) return;
-    try {{
-        const r = await fetch('/api/memory/' + id, {{ method: 'DELETE' }});
+    try {
+        const r = await fetch('/api/memory/' + id, { method: 'DELETE' });
         if (!r.ok) throw new Error('Failed');
         loadMemories();
-    }} catch(e) {{ alert('Error: ' + e.message); }}
-}}
+    } catch(e) { alert('Error: ' + e.message); }
+}
 
-async function togglePin(id, pinned) {{
-    try {{
-        const r = await fetch('/api/memory/pin/' + id, {{ method: pinned ? 'POST' : 'DELETE' }});
+async function togglePin(id, pinned) {
+    try {
+        const r = await fetch('/api/memory/pin/' + id, { method: pinned ? 'POST' : 'DELETE' });
         if (!r.ok) throw new Error('Failed');
         loadMemories();
-    }} catch(e) {{ alert('Error: ' + e.message); }}
-}}
+    } catch(e) { alert('Error: ' + e.message); }
+}
 
-document.getElementById('searchBox').addEventListener('input', e => {{
+document.getElementById('searchBox').addEventListener('input', e => {
     clearTimeout(window._searchTimeout);
     window._searchTimeout = setTimeout(() => searchMemories(e.target.value), 300);
-}});
+});
 
-document.addEventListener('keydown', e => {{
-    if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {{
+document.addEventListener('keydown', e => {
+    if (e.key === '/' && document.activeElement.tagName !== 'INPUT' && document.activeElement.tagName !== 'TEXTAREA') {
         e.preventDefault();
         document.getElementById('searchBox').focus();
-    }}
-}});
+    }
+});
 
 loadMemories();
 </script>
-</body></html>"#))
+</body></html>"#,
+    ].concat();
+
+    Html(html)
 }
 
 async fn skills_page() -> Html<String> {
-    Html(format!(r#"<!DOCTYPE html>
+    let html = [
+        r#"<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Skills - Chetna</title>
-<style>{STYLE}</style>
+<style>"#,
+        STYLE,
+        r#"</style>
 </head><body>
-{HEADER_HTML}
-<div class="container">
+"#,
+        HEADER_HTML,
+        r#"<div class="container">
     <div class="toolbar">
         <input type="text" class="search-box" id="searchBox" placeholder="Search skills...">
         <button class="btn" onclick="alert('Use API to create skills')">+ New</button>
@@ -733,65 +744,72 @@ async fn skills_page() -> Html<String> {
     <div id="skills" class="item-list"><div class="loading">Loading...</div></div>
 </div>
 <script>
-async function loadSkills() {{
+async function loadSkills() {
     document.getElementById('skills').innerHTML = '<div class="loading">Loading...</div>';
-    try {{
+    try {
         const r = await fetch('/api/skill');
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const skills = await r.json();
         
-        if (skills.length === 0) {{
+        if (skills.length === 0) {
             document.getElementById('skills').innerHTML = '<div class="empty-state">No skills yet</div>';
             return;
-        }}
+        }
         
         document.getElementById('skills').innerHTML = skills.map(s => `
             <div class="item-card">
-                <div class="item-meta"><span class="badge">${{s.language}}</span></div>
-                <div style="font-weight:600;margin-bottom:0.5rem">${{escapeHtml(s.name)}}</div>
-                <div class="item-content">${{escapeHtml(s.description || 'No description')}}</div>
-                <pre>${{escapeHtml(s.code.substring(0, 500))}}</pre>
+                <div class="item-meta"><span class="badge">${s.language}</span></div>
+                <div style="font-weight:600;margin-bottom:0.5rem">${escapeHtml(s.name)}</div>
+                <div class="item-content">${escapeHtml(s.description || 'No description')}</div>
+                <pre>${escapeHtml(s.code.substring(0, 500))}</pre>
                 <div class="item-actions">
-                    <button class="btn btn-danger" onclick="deleteSkill('${{s.id}}')">Delete</button>
+                    <button class="btn btn-danger" onclick="deleteSkill('${s.id}')">Delete</button>
                 </div>
             </div>
         `).join('');
-    }} catch(e) {{
+    } catch(e) {
         document.getElementById('skills').innerHTML = '<div class="error-state">Error: ' + e.message + '</div>';
-    }}
-}}
+    }
+}
 
-function escapeHtml(t) {{ const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }}
+function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
 
-async function deleteSkill(id) {{
+async function deleteSkill(id) {
     if (!confirm('Delete this skill?')) return;
-    try {{
-        const r = await fetch('/api/skill/' + id, {{ method: 'DELETE' }});
+    try {
+        const r = await fetch('/api/skill/' + id, { method: 'DELETE' });
         if (!r.ok) throw new Error('Failed');
         loadSkills();
-    }} catch(e) {{ alert('Error: ' + e.message); }}
-}}
+    } catch(e) { alert('Error: ' + e.message); }
+}
 
-document.getElementById('searchBox').addEventListener('input', e => {{
+document.getElementById('searchBox').addEventListener('input', e => {
     const q = e.target.value.toLowerCase();
-    document.querySelectorAll('.item-card').forEach(card => {{
+    document.querySelectorAll('.item-card').forEach(card => {
         card.style.display = card.textContent.toLowerCase().includes(q) ? '' : 'none';
-    }});
-}});
+    });
+});
 
 loadSkills();
 </script>
-</body></html>"#))
+</body></html>"#,
+    ].concat();
+
+    Html(html)
 }
 
 async fn sessions_page() -> Html<String> {
-    Html(format!(r#"<!DOCTYPE html>
+    let html = [
+        r#"<!DOCTYPE html>
 <html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Sessions - Chetna</title>
-<style>{STYLE}</style>
+<style>"#,
+        STYLE,
+        r#"</style>
 </head><body>
-{HEADER_HTML}
-<div class="container">
+"#,
+        HEADER_HTML,
+        r#"<div class="container">
     <div class="toolbar">
         <input type="text" class="search-box" id="searchBox" placeholder="Search sessions...">
         <button class="btn" onclick="createSession()">+ New</button>
@@ -800,75 +818,78 @@ async fn sessions_page() -> Html<String> {
     <div id="sessions" class="item-list"><div class="loading">Loading...</div></div>
 </div>
 <script>
-async function loadSessions() {{
+async function loadSessions() {
     document.getElementById('sessions').innerHTML = '<div class="loading">Loading...</div>';
-    try {{
+    try {
         const r = await fetch('/api/session');
         if (!r.ok) throw new Error('HTTP ' + r.status);
         const sessions = await r.json();
         
-        if (sessions.length === 0) {{
+        if (sessions.length === 0) {
             document.getElementById('sessions').innerHTML = '<div class="empty-state">No sessions yet</div>';
             return;
-        }}
+        }
         
-        document.getElementById('sessions').innerHTML = sessions.map(s => {{
+        document.getElementById('sessions').innerHTML = sessions.map(s => {
             const active = !s.ended_at;
             return `
             <div class="item-card">
                 <div class="item-meta">
-                    <span class="badge" style="background:${{active ? '#0a2a0a' : '#1a1a1a'}}">${{active ? 'Active' : 'Ended'}}</span>
-                    <span style="float:right">${{new Date(s.started_at).toLocaleString()}}</span>
+                    <span class="badge" style="background:${active ? '#0a2a0a' : '#1a1a1a'}">${active ? 'Active' : 'Ended'}</span>
+                    <span style="float:right">${new Date(s.started_at).toLocaleString()}</span>
                 </div>
-                <div style="font-weight:600">${{escapeHtml(s.name)}}</div>
+                <div style="font-weight:600">${escapeHtml(s.name)}</div>
                 <div class="item-actions">
-                    ${{active ? `<button class="btn" onclick="endSession('${{s.id}}')">End</button>` : ''}}
-                    <button class="btn btn-danger" onclick="deleteSession('${{s.id}}')">Delete</button>
+                    ${active ? `<button class="btn" onclick="endSession('${s.id}')">End</button>` : ''}
+                    <button class="btn btn-danger" onclick="deleteSession('${s.id}')">Delete</button>
                 </div>
             </div>
             `;
-        }}).join('');
-    }} catch(e) {{
+        }).join('');
+    } catch(e) {
         document.getElementById('sessions').innerHTML = '<div class="error-state">Error: ' + e.message + '</div>';
-    }}
-}}
+    }
+}
 
-function escapeHtml(t) {{ const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }}
+function escapeHtml(t) { const d = document.createElement('div'); d.textContent = t; return d.innerHTML; }
 
-async function createSession() {{
+async function createSession() {
     const name = prompt('Session name:');
     if (!name) return;
-    try {{
-        const r = await fetch('/api/session', {{
+    try {
+        const r = await fetch('/api/session', {
             method: 'POST',
-            headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{ name }})
-        }});
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ name })
+        });
         if (!r.ok) throw new Error('Failed');
         loadSessions();
-    }} catch(e) {{ alert('Error: ' + e.message); }}
-}}
+    } catch(e) { alert('Error: ' + e.message); }
+}
 
-async function endSession(id) {{
-    try {{
-        const r = await fetch('/api/session/' + id + '/end', {{ method: 'POST' }});
+async function endSession(id) {
+    try {
+        const r = await fetch('/api/session/' + id + '/end', { method: 'POST' });
         if (!r.ok) throw new Error('Failed');
         loadSessions();
-    }} catch(e) {{ alert('Error: ' + e.message); }}
-}}
+    } catch(e) { alert('Error: ' + e.message); }
+}
 
-async function deleteSession(id) {{
+async function deleteSession(id) {
     if (!confirm('Delete this session?')) return;
-    try {{
-        const r = await fetch('/api/session/' + id, {{ method: 'DELETE' }});
+    try {
+        const r = await fetch('/api/session/' + id, { method: 'DELETE' });
         if (!r.ok) throw new Error('Failed');
         loadSessions();
-    }} catch(e) {{ alert('Error: ' + e.message); }}
-}}
+    } catch(e) { alert('Error: ' + e.message); }
+}
 
 loadSessions();
 </script>
-</body></html>"#))
+</body></html>"#,
+    ].concat();
+
+    Html(html)
 }
 
 async fn settings_page() -> Html<String> {

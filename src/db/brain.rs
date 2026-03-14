@@ -377,6 +377,47 @@ impl Brain {
         }).await??)
     }
 
+    /// Human-like memory recall scoring
+    /// Combines: Similarity + Importance + Recency + Access Frequency + Emotional Weight
+    fn calculate_recall_score(memory: &Memory, similarity: f32, now: &chrono::DateTime<chrono::Utc>) -> f32 {
+        // 1. SIMILARITY (40%) - How relevant to current query
+        // Without similarity, we're just retrieving, not searching
+        let similarity_weight = 0.40;
+        
+        // 2. IMPORTANCE (25%) - Critical memories stick longer
+        // Pinned memories get a boost
+        let importance_boost = if memory.is_pinned { 1.0 } else { memory.importance as f32 };
+        let importance_weight = 0.25;
+        
+        // 3. RECENCY (15%) - Recent memories are easier to recall
+        // Decay over 30 days (720 hours)
+        let created = chrono::DateTime::parse_from_rfc3339(&memory.created_at)
+            .map(|dt| dt.with_timezone(&chrono::Utc))
+            .unwrap_or(*now);
+        let hours_since_creation = (*now - created).num_hours() as f32;
+        let recency_score = (-hours_since_creation / 720.0).exp().max(0.1);
+        let recency_weight = 0.15;
+        
+        // 4. ACCESS FREQUENCY (10%) - Frequently accessed = important
+        // Diminishing returns after 10 accesses
+        let access_score = (memory.access_count as f32 / 10.0).sqrt().min(1.0);
+        let access_weight = 0.10;
+        
+        // 5. EMOTIONAL WEIGHT (10%) - Emotional memories stick better
+        // Both positive and negative emotions enhance recall
+        let emotional_intensity = memory.emotional_tone.abs() as f32;
+        let emotional_weight = 0.10;
+        
+        // Combined score
+        let score = (similarity * similarity_weight)
+            + (importance_boost * importance_weight)
+            + (recency_score * recency_weight)
+            + (access_score * access_weight)
+            + (emotional_intensity * emotional_weight);
+        
+        score
+    }
+
     /// Semantic search using embeddings - finds memories with similar meaning
     pub async fn semantic_search(&self, query: &str, limit: i64, min_similarity: f32) -> Result<Vec<Memory>> {
         let limit = limit.min(MAX_SEMANTIC_SEARCH_RESULTS);
@@ -388,25 +429,33 @@ impl Brain {
         };
 
         let query_vector = query_embedding.vector;
+        let now = chrono::Utc::now();
 
         // Fetch memories with embeddings (paginated with limit to prevent OOM)
         let memories = self.list_memories_with_embeddings_paginated(limit * 2).await?;
 
-        // Calculate similarity for each memory
+        // Calculate human-like recall scores
         let mut scored_memories: Vec<(Memory, f32)> = memories
             .into_iter()
             .filter_map(|mem| {
                 if let Some(ref emb) = mem.embedding {
                     let similarity = Embedder::cosine_similarity(&query_vector, emb);
-                    if similarity >= min_similarity {
-                        return Some((mem, similarity));
+                    
+                    // Skip if similarity is too low (not relevant at all)
+                    if similarity < min_similarity * 0.5 {
+                        return None;
                     }
+                    
+                    // Calculate combined recall score like human brain
+                    let recall_score = Self::calculate_recall_score(&mem, similarity, &now);
+                    
+                    return Some((mem, recall_score));
                 }
                 None
             })
             .collect();
 
-        // Sort by similarity
+        // Sort by recall score (human-like: important + relevant + recent)
         scored_memories.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Return top results
@@ -740,11 +789,11 @@ impl Brain {
         // Try semantic search first
         let semantic_result = self.semantic_search(query, 50, 0.3).await;
         
-        // If semantic search returns poor results, fall back to keyword search
+        // If semantic search returns poor results, fall back to keyword search with human-like scoring
         let memories = match semantic_result {
             Ok(semantic_memories) if !semantic_memories.is_empty() => Ok(semantic_memories),
             _ => {
-                // Keyword fallback
+                // Keyword fallback - returns by importance (semantic search already has combined scoring)
                 let conn = self.conn.clone();
                 let query_str = query.to_string();
                 tokio::task::spawn_blocking(move || {
@@ -1307,7 +1356,9 @@ impl Brain {
             "system" => 10000.0,
             "preference" => 720.0,
             "fact" => 168.0,
-            "event" => 24.0,
+            "experience" => 24.0,
+            "skill_learned" => 336.0,
+            "rule" => 240.0,
             _ => 72.0,
         }
     }
@@ -1341,7 +1392,7 @@ impl Brain {
                 .unwrap_or(now);
             
             let hours_since_creation = (now - created).num_hours() as f64;
-            let stability = Self::get_stability_for_category(&memory.memory_category);
+            let stability = Self::get_stability_for_category(&memory.memory_type);
             
             let base_decay = (-hours_since_creation / stability).exp();
             let access_boost = (memory.access_count as f64 * 0.02).min(0.5);
