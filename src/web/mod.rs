@@ -227,9 +227,13 @@ async fn dashboard() -> Html<String> {
 
     <div class="card">
         <h2>🧠 Memory Operations</h2>
+        <p style="color:#666;font-size:0.85rem;margin-bottom:1rem">
+            Manual memory management. Auto-decay/flush can be enabled in <a href="/settings" style="color:#fff;text-decoration:underline">Settings</a>.
+        </p>
+        <div id="autoStatus" style="margin-bottom:1rem;padding:0.5rem;background:#1a1a1a;border-radius:6px;font-size:0.85rem;display:none"></div>
         <div class="toolbar">
             <button class="btn btn-primary" onclick="runConsolidate()">🔄 Run LLM Consolidation</button>
-            <button class="btn" onclick="runDecay()">📉 Apply Ebbinghaus Decay</button>
+            <button class="btn" onclick="runDecay()">📉 Apply Decay Now</button>
             <button class="btn" onclick="runFlush()">🗑️ Flush Low Importance</button>
         </div>
         <div id="consolidateResults" class="message" style="display:none"></div>
@@ -282,6 +286,26 @@ async function loadStats() {{
         document.getElementById('totalSkills').textContent = d.total_skills || 0;
         document.getElementById('totalProcedures').textContent = d.total_procedures || 0;
     }} catch(e) {{ console.error(e); }}
+}}
+
+async function loadAutoStatus() {{
+    try {{
+        const r = await fetch('/api/config/consolidation/status');
+        const d = await r.json();
+
+        const statusText = [];
+        if (d.auto_decay_enabled) statusText.push('✅ Auto-decay enabled');
+        else statusText.push('⚠️ Auto-decay disabled');
+
+        if (d.auto_flush_enabled) statusText.push('✅ Auto-flush enabled');
+        else statusText.push('⚠️ Auto-flush disabled');
+
+        const statusEl = document.getElementById('autoStatus');
+        if (statusEl) {{
+            statusEl.innerHTML = statusText.join(' | ');
+            statusEl.style.display = 'block';
+        }}
+    }} catch(e) {{ console.error('Failed to load auto status:', e); }}
 }}
 
 async function loadConnectionStatus() {{
@@ -416,6 +440,12 @@ async function runSearch() {{
     }}
 }}
 
+function escapeHtml(t) {{
+    const d = document.createElement('div');
+    d.textContent = t;
+    return d.innerHTML;
+}}
+
 async function runConsolidate() {{
     const resultsDiv = document.getElementById('consolidateResults');
     resultsDiv.style.display = 'block';
@@ -499,6 +529,7 @@ document.getElementById('contextQuery').addEventListener('keypress', e => {{
 }});
 
 loadStats();
+loadAutoStatus();
 loadConnectionStatus();
 </script>
 </body></html>"#))
