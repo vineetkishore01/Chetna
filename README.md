@@ -1,4 +1,4 @@
-# 🧠 Chetna - God-Tier Memory System
+# 🧠 Chetna - A Memory System
 
 > **Chetna** (Hindi: चेतना) = Consciousness, Awareness, Knowledge
 
