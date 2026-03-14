@@ -344,14 +344,21 @@ impl Brain {
         // Try semantic search first if embedder is available and query is not empty
         if let Some(ref embedder) = self.embedder {
             if !query.trim().is_empty() {
+                tracing::info!("🔍 Semantic search for: {}", query);
                 match embedder.embed(query).await {
-                    Ok(_) => return Box::pin(self.semantic_search(query, limit, 0.3)).await,
-                    Err(e) => tracing::debug!("Embedder not available, falling back to keyword: {}", e),
+                    Ok(_) => {
+                        tracing::debug!("Embedding created successfully, running semantic search");
+                        return Box::pin(self.semantic_search(query, limit, 0.3)).await;
+                    },
+                    Err(e) => {
+                        tracing::warn!("Embedder failed, falling back to keyword search: {}", e);
+                    }
                 }
             }
         }
 
         // Fall back to keyword search
+        tracing::debug!("Keyword search for: {}", query);
         self.keyword_search(query, limit).await
     }
 
@@ -899,6 +906,20 @@ impl Brain {
         Ok(())
     }
 
+    pub async fn delete_session(&self, id: &str) -> Result<()> {
+        let conn = self.conn.clone();
+        let id = id.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "DELETE FROM sessions WHERE id = ?1",
+                params![id],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        }).await?;
+        Ok(())
+    }
+
     // ==================== SKILL OPERATIONS ====================
 
     pub async fn list_skills(&self) -> Result<Vec<Skill>> {
@@ -1220,10 +1241,15 @@ impl Brain {
             return Ok((0, 0));
         }
 
+        tracing::info!("🔄 Starting LLM consolidation (limit: {})", limit);
+        tracing::info!("   Using LLM model: {} at {}", config.llm_model, config.llm_base_url.as_ref().unwrap_or(&"unknown".to_string()));
+
         let memories = self.list_memories(limit).await?;
+        tracing::info!("   Found {} memories to process", memories.len());
+
         let base_url = config.llm_base_url.unwrap_or_else(|| "http://localhost:11434".to_string());
         let model = config.llm_model.clone();
-        
+
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
@@ -1234,8 +1260,11 @@ impl Brain {
 
         for memory in memories.iter().take(50) {
             if memory.is_pinned {
+                tracing::debug!("Skipping pinned memory: {}", memory.id);
                 continue;
             }
+
+            tracing::debug!("Processing memory {}/{}: {}", processed + 1, memories.len().min(50), memory.content.chars().take(50).collect::<String>());
 
             let prompt = format!(
                 "Analyze this memory and rate its importance from 0.0 to 1.0. Consider: factual knowledge (higher), user preferences (higher), emotional content (higher), transient info (lower).\n\nMemory: {}\n\nRespond with only a number between 0.0 and 1.0.",
@@ -1255,7 +1284,9 @@ impl Brain {
                             if let Some(text) = content.as_str() {
                                 if let Ok(importance) = text.trim().parse::<f64>() {
                                     let importance = importance.clamp(0.0, 1.0);
+                                    let old_importance = memory.importance;
                                     if self.update_memory_importance(&memory.id, importance, "llm").await.is_ok() {
+                                        tracing::debug!("Updated importance: {} -> {:.2}", memory.content.chars().take(30).collect::<String>(), importance);
                                         updated += 1;
                                     }
                                 }
@@ -1266,6 +1297,8 @@ impl Brain {
             }
             processed += 1;
         }
+
+        tracing::info!("✅ LLM consolidation complete: processed={}, updated={}", processed, updated);
 
         Ok((processed, updated))
     }

@@ -10,9 +10,9 @@ use crate::{Brain, cache::SessionCache, config_file::UserConfig};
 pub fn router(_brain: Arc<Brain>) -> Router<(Arc<Brain>, Arc<SessionCache>, Arc<tokio::sync::RwLock<UserConfig>>)> {
     Router::new()
         .route("/", get(list_sessions).post(create_session))
-        .route("/:id", get(get_session))
+        .route("/:id", get(get_session).delete(delete_session))
         .route("/:id/end", post(end_session))
-        
+
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -80,6 +80,18 @@ async fn end_session(
     Ok(Json(serde_json::json!({
         "success": true,
         "message": "Session ended",
+        "session_id": id
+    })))
+}
+
+async fn delete_session(
+    State((brain, _, _)): State<(Arc<Brain>, Arc<SessionCache>, Arc<tokio::sync::RwLock<UserConfig>>)>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, String> {
+    brain.delete_session(&id).await.map_err(|e| e.to_string())?;
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "message": "Session deleted",
         "session_id": id
     })))
 }

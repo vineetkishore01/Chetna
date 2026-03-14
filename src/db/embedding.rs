@@ -105,16 +105,26 @@ impl Embedder {
 
         // Check cache first
         if let Some(cached) = self.get_cached(&hash).await? {
+            tracing::debug!("Embedding cache hit for: {}", text.chars().take(50).collect::<String>());
             return Ok(cached);
         }
 
+        tracing::debug!("Creating embedding for: {}", text.chars().take(50).collect::<String>());
+
         // Generate new embedding
         let vector = match self.provider {
-            EmbeddingProvider::Ollama => self.embed_ollama(text).await?,
+            EmbeddingProvider::Ollama => {
+                tracing::debug!("Using Ollama embedding model: {}", self.model);
+                self.embed_ollama(text).await?
+            },
             EmbeddingProvider::OpenAI | EmbeddingProvider::OpenRouter => {
+                tracing::debug!("Using OpenAI embedding model: {}", self.model);
                 self.embed_openai(text).await?
             }
-            EmbeddingProvider::Google => self.embed_google(text).await?,
+            EmbeddingProvider::Google => {
+                tracing::debug!("Using Google embedding model: {}", self.model);
+                self.embed_google(text).await?
+            },
         };
 
         // Cache the result
