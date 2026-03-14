@@ -45,6 +45,9 @@ impl Scheduler {
             let mut ticker = interval(consolidation_interval);
             info!("📅 Scheduler started with interval: {} hours", config.consolidation_interval_hours);
 
+            // Wait for initial interval before first run (prevents immediate execution on startup)
+            ticker.tick().await;
+
             loop {
                 ticker.tick().await;
 

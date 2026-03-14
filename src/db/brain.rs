@@ -1284,7 +1284,6 @@ impl Brain {
                             if let Some(text) = content.as_str() {
                                 if let Ok(importance) = text.trim().parse::<f64>() {
                                     let importance = importance.clamp(0.0, 1.0);
-                                    let old_importance = memory.importance;
                                     if self.update_memory_importance(&memory.id, importance, "llm").await.is_ok() {
                                         tracing::debug!("Updated importance: {} -> {:.2}", memory.content.chars().take(30).collect::<String>(), importance);
                                         updated += 1;
