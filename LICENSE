@@ -1,0 +1,98 @@
+# Chetna License
+
+**Version 1.0** - Copyright (c) 2026 Vineet Kishore
+
+---
+
+## Permission
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+---
+
+## Attribution
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+### Requirements:
+
+1. **Source distributions** must retain the copyright notice in source files.
+
+2. **Binary/compiled distributions** must include the copyright notice in
+   documentation, "About" screens, or other visible attribution.
+
+3. **Modified versions** must state that changes were made and include the
+   modification date. Example: "Based on Chetna, modified [date]."
+
+### Acceptable Attribution Phrases
+
+- "Powered by Chetna"
+- "Built with Chetna"
+- "Based on Chetna AI Memory System"
+- "Uses Chetna for memory management"
+
+---
+
+## Trademark
+
+"Chetna" is a trademark of Vineet Kishore. This license does not grant the
+right to use the trademark except as required for attribution.
+
+**You may NOT:**
+- Use "Chetna" as the primary name for competing products or services
+- Suggest official endorsement or affiliation without permission
+- Use "Chetna" in domain names or social media handles that impersonate
+  the official project
+
+For detailed trademark guidelines, see [TRADEMARK.md](TRADEMARK.md).
+
+---
+
+## Derivative Works
+
+If you create a modified version of this software:
+
+1. You may distribute it under a different name (do not call it "Chetna Pro",
+   "Chetna Enterprise", "Chetna Cloud", or similar)
+
+2. Include prominent attribution such as:
+   ```
+   This software is based on Chetna (https://github.com/vineetkishore01/Chetna).
+   Chetna is a trademark of Vineet Kishore.
+   ```
+
+3. Include the full license text
+
+---
+
+## No Warranty
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+## No Endorsement
+
+The name "Chetna" may not be used to endorse or promote products derived from
+this Software without specific prior written permission.
+
+---
+
+## Contact
+
+- Project: https://github.com/vineetkishore01/Chetna
+- Trademark Guidelines: https://github.com/vineetkishore01/Chetna/blob/main/TRADEMARK.md
+
+For questions about permitted uses, contact: vineetkishore01@gmail.com

@@ -1,0 +1,78 @@
+[package]
+name = "chetna"
+version = "0.1.0"
+edition = "2021"
+description = "God-Tier Memory System for AI Agents"
+authors = ["Wolverine Team"]
+license = "MIT"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+
+# Web server
+axum = "0.7"
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "fs"] }
+
+# Database
+rusqlite = { version = "0.31", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# UUID
+uuid = { version = "1.6", features = ["v4", "serde"] }
+
+# DateTime
+chrono = { version = "0.4", features = ["serde"] }
+
+# Regex
+regex = "1.10"
+
+# Async traits
+# async-trait = "0.1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# tracing-appender = "0.2"
+
+# Error handling
+# thiserror = "1.0"
+anyhow = "1.0"
+
+# Environment
+dotenv = "0.15"
+
+# HTTP client (for embeddings)
+reqwest = { version = "0.11", features = ["json"] }
+
+# Cryptography for content hashing
+sha2 = "0.10"
+
+# LRU cache
+lru = "0.12"
+
+# Linear algebra for PCA
+# nalgebra = "0.32"
+
+# Async LRU cache
+futures = "0.3"
+futures-util = "0.3"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[lib]
+name = "chetna"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chetna"
+path = "src/main.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+strip = true

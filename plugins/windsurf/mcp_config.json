@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "chetna-memory": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-http",
+        "--port",
+        "1988",
+        "http://localhost:1987/api/mcp"
+      ]
+    }
+  }
+}

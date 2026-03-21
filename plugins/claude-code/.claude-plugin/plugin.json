@@ -1,0 +1,18 @@
+{
+  "name": "chetna",
+  "version": "0.1.0",
+  "description": "Permanent memory for Claude Code - never forget user preferences, context, or important facts",
+  "author": {
+    "name": "Vineet Kishore",
+    "email": "vineetkishore01@gmail.com"
+  },
+  "commands": [
+    "./commands/remember.md",
+    "./commands/recall.md",
+    "./commands/stats.md",
+    "./commands/search.md"
+  ],
+  "skills": [
+    "./skills/memory.md"
+  ]
+}
