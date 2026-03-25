@@ -160,8 +160,8 @@ input:focus { border-color: #444; outline: none; }
 }
 "#;
 
-async fn dashboard() -> Html<String> {
-    Html(format!(r#"
+fn layout(content: &str, active_tab: &str) -> String {
+    format!(r#"
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -180,15 +180,68 @@ async fn dashboard() -> Html<String> {
             </div>
         </div>
         <nav class="nav">
-            <a href="/" class="active">Dashboard</a>
-            <a href="/memories">Memories</a>
-            <a href="/sessions">Sessions</a>
-            <a href="/settings">Settings</a>
+            <a href="/" class="{}">Dashboard</a>
+            <a href="/memories" class="{}">Memories</a>
+            <a href="/sessions" class="{}">Sessions</a>
+            <a href="/settings" class="{}">Settings</a>
         </nav>
     </header>
 
     <main class="container" id="mainContent">
-        <div id="loadingView" class="loading">Initializing Brain...</div>
+        {}
+    </main>
+
+    <div id="toast" class="toast"></div>
+
+    <script>
+        async function checkHealth() {{
+            try {{
+                const resp = await fetch('/api/config/health');
+                if (!resp.ok) throw new Error('Health check failed');
+                const data = await resp.json();
+                const dot = document.getElementById('statusDot');
+                const text = document.getElementById('statusText');
+                
+                if (data.connected) {{
+                    dot.className = 'status-dot online';
+                    text.innerText = 'System Live';
+                }} else {{
+                    dot.className = 'status-dot offline';
+                    text.innerText = 'Provider Disconnected';
+                }}
+            }} catch (e) {{
+                const dot = document.getElementById('statusDot');
+                const text = document.getElementById('statusText');
+                dot.className = 'status-dot offline';
+                text.innerText = 'API Offline';
+                console.error(e);
+            }}
+        }}
+
+        function showToast(msg) {{
+            const t = document.getElementById('toast');
+            t.innerText = msg;
+            t.style.display = 'block';
+            setTimeout(() => t.style.display = 'none', 3000);
+        }}
+
+        checkHealth();
+        setInterval(checkHealth, 5000);
+    </script>
+</body>
+</html>
+"#, 
+    STYLE,
+    if active_tab == "dashboard" { "active" } else { "" },
+    if active_tab == "memories" { "active" } else { "" },
+    if active_tab == "sessions" { "active" } else { "" },
+    if active_tab == "settings" { "active" } else { "" },
+    content)
+}
+
+async fn dashboard() -> Html<String> {
+    let dashboard_content = r#"
+        <div id="loadingView" style="text-align: center; padding: 4rem;">Initializing Brain...</div>
         
         <!-- Onboarding View -->
         <div id="onboardingView" style="display: none;">
@@ -197,17 +250,17 @@ async fn dashboard() -> Html<String> {
                     <h2>Welcome to Chetna</h2>
                     <p>Let's configure your memory engine. Where should we get your embeddings?</p>
                     <label>Provider</label>
-                    <select id="setupProvider">
+                    <select id="setupProvider" style="width: 100%;" onchange="toggleProviderFields()">
                         <option value="ollama">Ollama (Local)</option>
                         <option value="openai">OpenAI (Cloud)</option>
                     </select>
                     <div id="ollamaFields">
                         <label>Base URL</label>
-                        <input type="text" id="setupBaseUrl" value="http://localhost:11434">
+                        <input type="text" id="setupBaseUrl" value="http://localhost:11434" style="width: 100%;">
                     </div>
                     <div id="openaiFields" style="display:none;">
                         <label>API Key</label>
-                        <input type="password" id="setupApiKey" placeholder="sk-...">
+                        <input type="password" id="setupApiKey" placeholder="sk-..." style="width: 100%;">
                     </div>
                     <button class="btn btn-primary" onclick="testAndNext()">Next: Validate Connection</button>
                 </div>
@@ -217,7 +270,7 @@ async fn dashboard() -> Html<String> {
                     <p id="validationMsg">Waiting for response from provider...</p>
                     <div id="modelSelectArea" style="display:none;">
                         <label>Select Model</label>
-                        <select id="setupModel"></select>
+                        <select id="setupModel" style="width: 100%;"></select>
                         <button class="btn btn-primary" onclick="completeSetup()">Finish Setup</button>
                     </div>
                     <button id="retryBtn" class="btn btn-outline" style="display:none;" onclick="location.reload()">Retry</button>
@@ -249,141 +302,301 @@ async fn dashboard() -> Html<String> {
 
             <div id="searchResults" style="margin-top: 2rem;"></div>
         </div>
-    </main>
 
-    <div id="toast" class="toast"></div>
+        <script>
+            let config = null;
 
-    <script>
-        let config = null;
+            function toggleProviderFields() {
+                const provider = document.getElementById('setupProvider').value;
+                document.getElementById('ollamaFields').style.display = provider === 'ollama' ? 'block' : 'none';
+                document.getElementById('openaiFields').style.display = provider === 'openai' ? 'block' : 'none';
+            }
 
-        async fn init() {{
-            const resp = await fetch('/api/config');
-            config = await resp.json();
-            
-            // Check if configured
-            if (!config.provider || (config.provider === 'ollama' && !config.base_url)) {{
-                showOnboarding();
-            }} else {{
-                showDashboard();
-                checkHealth();
-            }}
-        }}
+            async function init() {
+                try {
+                    const resp = await fetch('/api/config');
+                    if (!resp.ok) throw new Error('Failed to load config');
+                    config = await resp.json();
+                    
+                    if (!config.provider || (config.provider === 'ollama' && !config.base_url)) {
+                        showOnboarding();
+                    } else {
+                        showDashboard();
+                    }
+                } catch (e) {
+                    console.error("Init failed", e);
+                    document.getElementById('loadingView').innerText = "✕ Failed to connect to Brain API";
+                }
+            }
 
-        function showOnboarding() {{
-            document.getElementById('loadingView').style.display = 'none';
-            document.getElementById('onboardingView').style.display = 'block';
-        }}
+            function showOnboarding() {
+                document.getElementById('loadingView').style.display = 'none';
+                document.getElementById('onboardingView').style.display = 'block';
+            }
 
-        function showDashboard() {{
-            document.getElementById('loadingView').style.display = 'none';
-            document.getElementById('dashboardView').style.display = 'block';
-            loadStats();
-        }}
+            function showDashboard() {
+                document.getElementById('loadingView').style.display = 'none';
+                document.getElementById('dashboardView').style.display = 'block';
+                loadStats();
+            }
 
-        async function checkHealth() {{
-            try {{
-                const resp = await fetch('/api/config/health');
-                const data = await resp.json();
-                const dot = document.getElementById('statusDot');
-                const text = document.getElementById('statusText');
-                
-                if (data.connected) {{
-                    dot.className = 'status-dot online';
-                    text.innerText = 'System Live';
-                }} else {{
-                    dot.className = 'status-dot offline';
-                    text.innerText = 'Provider Disconnected';
-                }}
-            }} catch (e) {{
-                console.error(e);
-            }}
-        }}
+            async function testAndNext() {
+                const provider = document.getElementById('setupProvider').value;
+                const baseUrl = document.getElementById('setupBaseUrl').value;
+                const apiKey = document.getElementById('setupApiKey').value;
 
-        async function testAndNext() {{
-            const provider = document.getElementById('setupProvider').value;
-            const baseUrl = document.getElementById('setupBaseUrl').value;
-            const apiKey = document.getElementById('setupApiKey').value;
+                document.getElementById('step1').classList.remove('active');
+                document.getElementById('step2').classList.add('active');
 
-            document.getElementById('step1').classList.remove('active');
-            document.getElementById('step2').classList.add('active');
-
-            try {{
-                const resp = await fetch('/api/config/ping', {{
-                    method: 'POST',
-                    headers: {{ 'Content-Type': 'application/json' }},
-                    body: JSON.stringify({{ provider, base_url: baseUrl, api_key: apiKey, model: 'test' }})
-                }});
-                const data = await resp.json();
-                
-                if (data.success) {{
-                    document.getElementById('validationMsg').innerText = '✓ Connection Successful';
-                    // In a real app, we'd fetch models here
-                    document.getElementById('modelSelectArea').style.display = 'block';
-                    const modelSelect = document.getElementById('setupModel');
-                    const models = provider === 'ollama' ? ['nomic-embed-text', 'mxbai-embed-large'] : ['text-embedding-3-small'];
-                    models.forEach(m => {{
-                        const opt = document.createElement('option');
-                        opt.value = m; opt.innerText = m;
-                        modelSelect.appendChild(opt);
-                    }});
-                }} else {{
-                    document.getElementById('validationMsg').innerText = '✕ Connection Failed: ' + data.message;
+                try {
+                    const resp = await fetch('/api/config/ping', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ provider, base_url: baseUrl, api_key: apiKey, model: 'test' })
+                    });
+                    const data = await resp.json();
+                    
+                    if (data.success) {
+                        document.getElementById('validationMsg').innerText = '✓ Connection Successful';
+                        document.getElementById('modelSelectArea').style.display = 'block';
+                        const modelSelect = document.getElementById('setupModel');
+                        
+                        // Try to get actual models from status endpoint
+                        try {
+                            // Temporary update config so status check works
+                            await fetch('/api/config', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ provider, base_url: baseUrl, api_key: apiKey, model: 'nomic-embed-text' })
+                            });
+                            
+                            const statusResp = await fetch('/api/status/connections');
+                            const statusData = await statusResp.json();
+                            
+                            if (statusData.embedding && statusData.embedding.available_models && statusData.embedding.available_models.length > 0) {
+                                statusData.embedding.available_models.forEach(m => {
+                                    const opt = document.createElement('option');
+                                    opt.value = m; opt.innerText = m;
+                                    modelSelect.appendChild(opt);
+                                });
+                            } else {
+                                throw new Error('No models found');
+                            }
+                        } catch (err) {
+                            console.warn("Could not fetch models, using defaults", err);
+                            const models = provider === 'ollama' ? ['nomic-embed-text', 'mxbai-embed-large', 'qwen3-embedding:4b'] : ['text-embedding-3-small'];
+                            models.forEach(m => {
+                                const opt = document.createElement('option');
+                                opt.value = m; opt.innerText = m;
+                                modelSelect.appendChild(opt);
+                            });
+                        }
+                    } else {
+                        document.getElementById('validationMsg').innerText = '✕ Connection Failed: ' + data.message;
+                        document.getElementById('retryBtn').style.display = 'block';
+                    }
+                } catch (e) {
+                    document.getElementById('validationMsg').innerText = '✕ Error: ' + e.message;
                     document.getElementById('retryBtn').style.display = 'block';
-                }}
-            }} catch (e) {{
-                document.getElementById('validationMsg').innerText = '✕ Error: ' + e.message;
-                document.getElementById('retryBtn').style.display = 'block';
-            }}
-        }}
+                }
+            }
 
-        async function completeSetup() {{
-            const provider = document.getElementById('setupProvider').value;
-            const baseUrl = document.getElementById('setupBaseUrl').value;
-            const apiKey = document.getElementById('setupApiKey').value;
-            const model = document.getElementById('setupModel').value;
+            async function completeSetup() {
+                const provider = document.getElementById('setupProvider').value;
+                const baseUrl = document.getElementById('setupBaseUrl').value;
+                const apiKey = document.getElementById('setupApiKey').value;
+                const model = document.getElementById('setupModel').value;
 
-            const resp = await fetch('/api/config', {{
-                method: 'POST',
-                headers: {{ 'Content-Type': 'application/json' }},
-                body: JSON.stringify({{ provider, base_url: baseUrl, api_key: apiKey, model }})
-            }});
-            
-            if (resp.ok) {{
-                showToast('Brain Initialized');
-                location.reload();
-            }}
-        }}
+                const resp = await fetch('/api/config', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ provider, model, base_url: baseUrl, api_key: apiKey })
+                });
+                
+                if (resp.ok) {
+                    showToast('Brain Initialized');
+                    location.reload();
+                }
+            }
 
-        async function loadStats() {{
-            const resp = await fetch('/api/stats');
-            const data = await resp.json();
-            document.getElementById('countMemories').innerText = data.total_memories || 0;
-            document.getElementById('countRecall').innerText = data.total_sessions || 0;
-            document.getElementById('countSkills').innerText = (data.total_skills || 0) + (data.total_procedures || 0);
-        }}
+            async function loadStats() {
+                try {
+                    const resp = await fetch('/api/stats');
+                    const data = await resp.json();
+                    document.getElementById('countMemories').innerText = data.total_memories || 0;
+                    document.getElementById('countRecall').innerText = data.total_sessions || 0;
+                    document.getElementById('countSkills').innerText = (data.total_skills || 0) + (data.total_procedures || 0);
+                } catch (e) {
+                    console.error("Load stats failed", e);
+                }
+            }
 
-        function showToast(msg) {{
-            const t = document.getElementById('toast');
-            t.innerText = msg;
-            t.style.display = 'block';
-            setTimeout(() => t.style.display = 'none', 3000);
-        }}
+            let searchTimeout = null;
+            async function handleSearch(event) {
+                const query = event.target.value;
+                if (query.length < 3) {
+                    document.getElementById('searchResults').innerHTML = '';
+                    return;
+                }
+                
+                if (searchTimeout) clearTimeout(searchTimeout);
+                
+                searchTimeout = setTimeout(async () => {
+                    try {
+                        const resp = await fetch(`/api/memory/search?query=${encodeURIComponent(query)}&limit=10`);
+                        const memories = await resp.json();
+                        
+                        const container = document.getElementById('searchResults');
+                        if (memories.length === 0) {
+                            container.innerHTML = '<div style="color: #444; text-align: center; padding: 2rem;">No matching memories found.</div>';
+                            return;
+                        }
+                        
+                        container.innerHTML = `
+                            <h3 style="margin-bottom: 1rem; font-size: 0.9rem; color: #888;">Search Results</h3>
+                            ${memories.map(m => `
+                                <div style="background: #0a0a0a; padding: 1.25rem; border-radius: 10px; margin-bottom: 0.75rem; border: 1px solid #222; transition: border-color 0.2s;" onmouseover="this.style.borderColor='#444'" onmouseout="this.style.borderColor='#222'">
+                                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
+                                        <span style="font-size: 0.65rem; background: #1a1a1a; color: #888; padding: 0.2rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em;">${m.category}</span>
+                                        <span style="font-size: 0.65rem; color: #444;">${new Date(m.created_at).toLocaleDateString()}</span>
+                                    </div>
+                                    <div style="font-size: 0.95rem; color: #eee; line-height: 1.5;">${m.content}</div>
+                                    ${m.tags && m.tags.length > 0 ? `
+                                        <div style="margin-top: 0.75rem; display: flex; gap: 0.4rem; flex-wrap: wrap;">
+                                            ${m.tags.map(t => `<span style="font-size: 0.6rem; color: #555; border: 1px solid #222; padding: 0.1rem 0.4rem; border-radius: 3px;">#${t}</span>`).join('')}
+                                        </div>
+                                    ` : ''}
+                                </div>
+                            `).join('')}
+                        `;
+                    } catch (e) {
+                        console.error("Search failed", e);
+                    }
+                }, 300);
+            }
 
-        init();
-    </script>
-</body>
-</html>
-"#, STYLE))
+            init();
+        </script>
+    "#;
+    
+    Html(layout(dashboard_content, "dashboard"))
 }
 
 async fn memories_page() -> Html<String> {
-    Html("<h1>Memories Page</h1>".to_string())
+    let content = r#"
+        <h2>Memories</h2>
+        <p style="color: #888; margin-bottom: 2rem;">Explore and manage your long-term memory graph.</p>
+        <div id="memoriesList" class="grid"></div>
+        
+        <script>
+            async function loadMemories() {
+                try {
+                    const resp = await fetch('/api/memory?limit=50');
+                    const data = await resp.json();
+                    const container = document.getElementById('memoriesList');
+                    container.innerHTML = data.map(m => `
+                        <div class="stat-box">
+                            <div class="label">${m.category}</div>
+                            <div class="value" style="font-size: 0.9rem; line-height: 1.4;">${m.content}</div>
+                            <div style="margin-top: 1rem; font-size: 0.7rem; color: #444;">${new Date(m.created_at).toLocaleString()}</div>
+                        </div>
+                    `).join('');
+                } catch (e) {
+                    console.error("Load memories failed", e);
+                }
+            }
+            loadMemories();
+        </script>
+    "#;
+    Html(layout(content, "memories"))
 }
 
 async fn sessions_page() -> Html<String> {
-    Html("<h1>Sessions Page</h1>".to_string())
+    let content = r#"
+        <h2>Sessions</h2>
+        <p style="color: #888; margin-bottom: 2rem;">Active thought streams and conversation history.</p>
+        <div id="sessionsList" class="grid"></div>
+        
+        <script>
+            async function loadSessions() {
+                try {
+                    const resp = await fetch('/api/session');
+                    const data = await resp.json();
+                    const container = document.getElementById('sessionsList');
+                    container.innerHTML = data.map(s => `
+                        <div class="stat-box">
+                            <div class="label">Session ${s.id.substring(0,8)}</div>
+                            <div class="value" style="font-size: 0.9rem;">${s.summary || 'Active session'}</div>
+                        </div>
+                    `).join('');
+                } catch (e) {
+                    console.error("Load sessions failed", e);
+                }
+            }
+            loadSessions();
+        </script>
+    "#;
+    Html(layout(content, "sessions"))
 }
 
 async fn settings_page() -> Html<String> {
-    Html("<h1>Settings Page</h1>".to_string())
+    let content = r#"
+        <h2>Settings</h2>
+        <p style="color: #888; margin-bottom: 2rem;">Engine configuration and provider management.</p>
+        <div class="stat-box" style="max-width: 600px;">
+            <div id="settingsForm"></div>
+            <button class="btn btn-primary" onclick="saveSettings()">Save Changes</button>
+        </div>
+        
+        <script>
+            async function loadSettings() {
+                try {
+                    const resp = await fetch('/api/config');
+                    const data = await resp.json();
+                    const container = document.getElementById('settingsForm');
+                    container.innerHTML = `
+                        <div style="margin-bottom: 1.5rem;">
+                            <label class="label">Provider</label>
+                            <select id="editProvider" style="width: 100%;">
+                                <option value="ollama" ${data.provider === 'ollama' ? 'selected' : ''}>Ollama</option>
+                                <option value="openai" ${data.provider === 'openai' ? 'selected' : ''}>OpenAI</option>
+                            </select>
+                        </div>
+                        <div style="margin-bottom: 1.5rem;">
+                            <label class="label">Base URL / API Endpoint</label>
+                            <input type="text" id="editBaseUrl" value="${data.base_url || ''}" style="width: 100%;">
+                        </div>
+                        <div style="margin-bottom: 1.5rem;">
+                            <label class="label">Model</label>
+                            <input type="text" id="editModel" value="${data.model || ''}" style="width: 100%;">
+                        </div>
+                    `;
+                } catch (e) {
+                    console.error("Load settings failed", e);
+                }
+            }
+            
+            async function saveSettings() {
+                const provider = document.getElementById('editProvider').value;
+                const base_url = document.getElementById('editBaseUrl').value;
+                const model = document.getElementById('editModel').value;
+                
+                try {
+                    const resp = await fetch('/api/config', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ provider, base_url, model })
+                    });
+                    
+                    if (resp.ok) {
+                        showToast('Settings Saved');
+                    }
+                } catch (e) {
+                    console.error("Save settings failed", e);
+                }
+            }
+            loadSettings();
+        </script>
+    "#;
+    Html(layout(content, "settings"))
 }

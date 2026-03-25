@@ -6,93 +6,94 @@ Designed for developers and researchers, Chetna turns a simple vector database i
 
 ---
 
-## 🚀 Why Chetna?
+## 🚀 How Chetna Works: The Digital Brain
 
-Most AI agents forget everything once you close the chat. They hallucinate details and waste your expensive context window on old, irrelevant information.
+Chetna isn't just a database; it's a cognitive layer that mimics the human brain's memory lifecycle.
 
-**Chetna solves this by:**
+### 1. Memory Ingestion & Encoding
+When you save a memory, Chetna doesn't just store text. it performs **Deep Encoding**:
+- **Semantic Vectoring:** Generates high-dimensional embeddings (via Ollama/OpenAI).
+- **Entity Extraction:** Automatically identifies IPs, file paths, UUIDs, and Git hashes.
+- **Initial Importance:** Heuristically scores how "critical" a memory is based on content.
+
+```mermaid
+graph TD
+    A[Raw Input Text] --> B{Deep Encoding}
+    B --> C[Vector Embedding]
+    B --> D[Regex Entity Extraction]
+    B --> E[Heuristic Importance Scoring]
+    C & D & E --> F[SQLite + FTS5 Storage]
+    F --> G[Knowledge Graph Linking]
+```
+
+### 2. Biological Decay & Stability (Ebbinghaus 3.0)
+Like a human brain, Chetna "forgets" noise but protects vital information.
+- **The Forgetting Curve:** Memories decay exponentially over time.
+- **Active Recall Reset:** Every time an agent *explicitly* retrieves a memory by ID, its **Stability** increases and its "forgetting clock" resets to zero.
+- **Stability Boost:** Frequently accessed memories become "permanent" (decay slower).
+
+```mermaid
+graph LR
+    A[New Memory] -- Time Passes --> B((Decay))
+    B -- Importance < Threshold --> C[Forgotten/Deleted]
+    B -- Agent Recall --> D[Stability Boosted]
+    D -- Clock Reset --> A
+```
+
+### 3. Retrieval: Hybrid Search (RRF)
+Chetna uses **Reciprocal Rank Fusion** to ensure that "exact" technical matches (like an error code) and "vague" semantic matches (like a concept) are both found.
+
+```mermaid
+graph TD
+    A[Agent Query] --> B[Semantic Search]
+    A --> C[Keyword Search - BM25]
+    B --> D[Vector Matches]
+    C --> E[Exact Entity Matches]
+    D & E --> F{RRF Scorer}
+    F --> G[Weighted Result Set]
+    G --> H[Final Context for Agent]
+```
+
+---
+
+## 🧬 The Memory Lifecycle: A Concrete Example
+
+**Day 1: Storage**
+An agent stores: *"The user's server password is 'Apple123' and resides at /etc/config/secret."*
+1. **Chetna** generates a vector for "password" and "server."
+2. **Chetna** extracts `/etc/config/secret` as a searchable path entity.
+3. **Chetna** assigns high importance because it contains "password."
+
+**Day 10: Natural Decay**
+The memory hasn't been accessed. Its importance score has naturally dropped from **0.90** to **0.65** based on the Ebbinghaus curve.
+
+**Day 15: Active Recall**
+The agent asks: *"Where is the server secret stored?"*
+1. **Chetna** finds the memory via semantic search.
+2. The agent retrieves the full memory by ID to use the password.
+3. **Recall Event:** The memory's `access_count` increments, its `last_accessed` updates to **Now**, and its importance resets to **0.95**. It is now much harder to forget.
+
+---
+
+## ✨ Key Features
 - 🧩 **Persistent Memory:** Store facts once, retrieve them forever.
-- 🔍 **Hybrid Search:** Finds the *exact* code snippet or IP address you mentioned, not just "similar" concepts.
-- 📉 **Biological Decay:** Automatically forgets unimportant noise while "Active Recall" keeps vital info fresh.
-- 🤝 **Knowledge Graph:** Links related memories together, allowing agents to "walk" through complex logic.
+- 🔍 **Hybrid Search (RRF):** Concept-based search + 100% accurate entity matching.
+- 📉 **Spaced Repetition:** Smart decay ensures your context window isn't filled with old junk.
+- 🔗 **Protocol Ready (MCP):** Native support for Claude Desktop, Windsurf, and Cursor.
 
 ---
 
-## ✨ Features You'll Love
-
-### 🖥️ Zero-Config Dashboard
-Chetna comes with a beautiful, minimalist web dashboard. On your first launch, a guided setup wizard helps you connect to your embedding provider (like **Ollama** or **OpenAI**) and validates everything instantly. 
-
-### 🧬 Semantic + Keyword Search (RRF)
-We use **Reciprocal Rank Fusion** to combine the power of vector similarity with exact keyword matching. 
-*Example: It knows what you mean when you ask "how do I fix the bug?", but also perfectly finds the exact error code `E0432`.*
-
-### 🛡️ Multi-Agent Namespacing
-Running a fleet of agents? Use **Namespaces** to keep their memories separate. Your "Python Dev Agent" won't get confused by memories from your "Marketing Research Agent."
-
-### 🔗 Protocol Ready (MCP)
-Chetna fully supports the **Model Context Protocol (MCP)**. If your agent supports MCP (like Claude Desktop or Windsurf), it can autonomously manage its own memory without you writing a single line of integration code.
-
----
-
-## 🛠️ Quick Start (in 60 Seconds)
-
-The easiest way to get started is with our automated installer.
+## 🛠️ Quick Start
 
 ```bash
-# Clone the repository
+# Clone and Install
 git clone https://github.com/vineetkishore01/Chetna.git
 cd Chetna
-
-# Run the interactive installer
 ./install.sh
+
+# Visit Dashboard
+# http://localhost:1987
 ```
-
-**What happens next?**
-1. The script will check if you have **Rust** and **Ollama** installed.
-2. It will build the Chetna binary for your system.
-3. Once finished, visit **`http://localhost:1987`** to complete the setup.
-
----
-
-## 🔌 Using Chetna with your Agent
-
-Chetna is built as a **Memory-as-a-Service**. You can connect via a simple REST API.
-
-### 1. Store a Memory
-```python
-import requests
-
-requests.post("http://localhost:1987/api/memory", json={
-    "content": "The user prefers Python over JavaScript for data processing.",
-    "importance": 0.9,
-    "category": "preference"
-})
-```
-
-### 2. Search for Context
-```python
-# Ask Chetna for relevant context before sending a prompt to your AI
-response = requests.get("http://localhost:1987/api/memory/search", params={
-    "query": "Which language should I use for the data script?"
-})
-context = response.json()
-# Now use 'context' to ground your AI's response!
-```
-
----
-
-## 🏗️ Technical Stack
-- **Core:** Rust (for lightning-fast performance)
-- **Database:** SQLite + FTS5 + Vector Extensions
-- **UI:** OLED Minimalist (Zero bloat, pure JS/CSS)
-- **Protocol:** REST API & MCP Support
-
-## 📄 Documentation
-- 📖 [Quickstart Guide](docs/QUICKSTART.md)
-- 📡 [REST API Reference](docs/api.md)
-- 🔗 [MCP Integration](docs/mcp.md)
-- 📐 [Technical Specification](docs/SPEC.md)
 
 ---
 *Built with ❤️ for the future of autonomous agents.*

@@ -9,20 +9,31 @@ Chetna implements **Reciprocal Rank Fusion (RRF)** to combine two distinct searc
 - **Lexical Search (BM25):** Utilizes SQLite FTS5 to match technical strings (UUIDs, Git hashes, Paths) with 100% accuracy.
 - **Semantic Search (Vector):** Utilizes cosine similarity on text embeddings to find memories with similar conceptual meaning.
 
-**RRF Formula:**
-The final rank is calculated by merging ranks from both sources:
-`Score = Σ (1 / (k + rank_i))` where `k` is a constant (default 60).
+**RRF Scoring:**
+`Final_Score = Σ (1 / (k + rank_i))` where `k` is a constant (default 60).
+High-importance memories (pinned or manually scored > 0.8) receive a **relevance boost** in the final sorting to ensure critical rules outrank transient facts.
 
-### 2. Biological Decay System (Ebbinghaus 2.0)
-Chetna mimics human memory retention through a mathematical model:
+### 2. Biological Decay System (Ebbinghaus 3.0)
+Chetna mimics human memory retention through a persistent stability model:
 - **Base Formula:** `Importance_new = Importance_old * exp(-t / S)`
-- **Active Recall:** Every time a memory is accessed, its **Stability (S)** increases logarithmically.
-- **Retention:** Memories that are frequently "remembered" become more stable and decay slower than transient noise.
+- **Stability (S):** Calculated based on `memory_type` base stability (e.g., Facts = 168h, Rules = 240h) multiplied by the **Active Recall Boost**.
+- **Active Recall Boost:** `1.0 + ln(access_count)`.
+- **Spaced Repetition Reset:** Unlike simple decay, `t` (time) is calculated as hours since **`last_accessed`**. Every explicit recall resets the curve, effectively "refreshing" the memory in the agent's long-term storage.
+
+```mermaid
+graph LR
+    A[Ingestion] --> B[Decay Phase]
+    B -- Time Passes --> C{Access?}
+    C -- Yes --> D[Reset t=0, Incr S]
+    D --> B
+    C -- No --> E[Decay Importance]
+    E -- < Threshold --> F[Forget]
+```
 
 ### 3. Knowledge Graph Integration
 Instead of independent vectors, memories are linked via a **Directed Graph**:
 - **Chunking:** Large documents are split into overlapping chunks, each linked to a parent via a `PartOf` relationship.
-- **Logical Edges:** Supports `Contradicts`, `Supports`, `Reinforces`, and `PreRequisite` edges to allow agents to perform logical context traversal.
+- **Relationship Manager:** An asynchronous worker maintains `memory_relationships` using a dedicated SQLite table to track causal and structural links.
 
 ### 4. Technical Entity Extraction
 An internal regex-based pipeline automatically identifies and indexes the following entities during ingestion:
@@ -30,11 +41,6 @@ An internal regex-based pipeline automatically identifies and indexes the follow
 - **Git Hashes (Full & Short)**
 - **File Paths**
 - **UUIDs**
-
-### 5. Multi-Tenancy (Namespacing)
-To support multiple agents on a single server, all data is logically partitioned by a `namespace` string.
-- Default namespace: `default`
-- Isolation level: Database queries are filtered by `namespace` at the core engine level.
 
 ## Data Model
 
@@ -46,8 +52,8 @@ To support multiple agents on a single server, all data is logically partitioned
 | `content` | String | Raw text |
 | `entities` | String | Space-separated indexed entities |
 | `importance` | Float | Current recall weight (0-1) |
-| `embedding` | Blob | Vector data |
-| `tags` | JSON | Metadata tags |
+| `access_count`| Integer | Number of explicit recall events |
+| `last_accessed`| Timestamp | Last time memory was reset |
 | `is_pinned` | Bool | Prevents auto-decay |
 
 ### Relationship Struct

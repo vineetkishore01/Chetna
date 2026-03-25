@@ -67,7 +67,10 @@ impl McpServer {
                     "query": {"type": "string"},
                     "limit": {"type": "number", "default": 20},
                     "semantic": {"type": "boolean", "description": "Use semantic search", "default": false},
-                    "namespace": {"type": "string", "description": "Optional namespace", "default": "default"}
+                    "namespace": {"type": "string", "description": "Optional namespace", "default": "default"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags to filter by"},
+                    "memory_type": {"type": "string", "description": "Optional memory_type to filter by"},
+                    "min_importance": {"type": "number", "description": "Optional minimum importance"}
                 },
                 "required": ["query"]
             }),
@@ -81,7 +84,10 @@ impl McpServer {
                 "properties": {
                     "limit": {"type": "number", "default": 100},
                     "category": {"type": "string"},
-                    "namespace": {"type": "string", "description": "Optional namespace", "default": "default"}
+                    "namespace": {"type": "string", "description": "Optional namespace", "default": "default"},
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "Optional tags to filter by"},
+                    "memory_type": {"type": "string", "description": "Optional memory_type to filter by"},
+                    "min_importance": {"type": "number", "description": "Optional minimum importance"}
                 }
             }),
         });
@@ -410,12 +416,37 @@ impl McpServer {
                 let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(20);
                 let semantic = params.get("semantic").and_then(|v| v.as_bool()).unwrap_or(false);
                 let namespace = params.get("namespace").and_then(|v| v.as_str());
+                
+                let memory_type_filter = params.get("memory_type").and_then(|v| v.as_str());
+                let min_importance_filter = params.get("min_importance").and_then(|v| v.as_f64());
+                let tags_filter: Option<Vec<String>> = params.get("tags").and_then(|v| {
+                    v.as_array().map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
+                });
 
-                let memories = if semantic {
-                    brain.semantic_search(query, limit, 0.5, namespace).await.unwrap_or_default()
+                // Fetch a larger set to allow for in-memory filtering
+                let fetch_limit = if memory_type_filter.is_some() || tags_filter.is_some() || min_importance_filter.is_some() { limit * 10 } else { limit };
+
+                let mut memories = if semantic {
+                    brain.semantic_search(query, fetch_limit, 0.1, namespace).await.unwrap_or_default()
                 } else {
-                    brain.search_memories(query, limit, namespace).await.unwrap_or_default()
+                    brain.search_memories(query, fetch_limit, namespace).await.unwrap_or_default()
                 };
+
+                // Apply filters
+                memories.retain(|m| {
+                    if let Some(ref mt) = memory_type_filter {
+                        if &m.memory_type != mt { return false; }
+                    }
+                    if let Some(ref min_imp) = min_importance_filter {
+                        if m.importance < *min_imp { return false; }
+                    }
+                    if let Some(ref req_tags) = tags_filter {
+                        if !req_tags.iter().all(|t| m.tags.contains(t)) { return false; }
+                    }
+                    true
+                });
+
+                memories.truncate(limit as usize);
 
                 Ok(serde_json::json!({
                     "memories": memories.iter().map(|m| serde_json::json!({
@@ -423,7 +454,8 @@ impl McpServer {
                         "content": m.content,
                         "importance": m.importance,
                         "category": m.category,
-                        "tags": m.tags
+                        "tags": m.tags,
+                        "memory_type": m.memory_type
                     })).collect::<Vec<_>>()
                 }))
             }
@@ -434,13 +466,39 @@ impl McpServer {
                 let limit = params.get("limit").and_then(|v| v.as_i64()).unwrap_or(100);
                 let namespace = params.get("namespace").and_then(|v| v.as_str());
 
-                let memories = brain.list_memories(limit, namespace).await.unwrap_or_default();
+                let memory_type_filter = params.get("memory_type").and_then(|v| v.as_str());
+                let min_importance_filter = params.get("min_importance").and_then(|v| v.as_f64());
+                let tags_filter: Option<Vec<String>> = params.get("tags").and_then(|v| {
+                    v.as_array().map(|arr| arr.iter().filter_map(|t| t.as_str().map(|s| s.to_string())).collect())
+                });
+
+                let fetch_limit = if memory_type_filter.is_some() || tags_filter.is_some() || min_importance_filter.is_some() { limit * 10 } else { limit };
+
+                let mut memories = brain.list_memories(fetch_limit, namespace).await.unwrap_or_default();
+                
+                memories.retain(|m| {
+                    if let Some(ref mt) = memory_type_filter {
+                        if &m.memory_type != mt { return false; }
+                    }
+                    if let Some(ref min_imp) = min_importance_filter {
+                        if m.importance < *min_imp { return false; }
+                    }
+                    if let Some(ref req_tags) = tags_filter {
+                        if !req_tags.iter().all(|t| m.tags.contains(t)) { return false; }
+                    }
+                    true
+                });
+
+                memories.truncate(limit as usize);
+
                 Ok(serde_json::json!({
                     "memories": memories.iter().map(|m| serde_json::json!({
                         "id": m.id,
                         "content": m.content,
                         "importance": m.importance,
-                        "category": m.category
+                        "category": m.category,
+                        "tags": m.tags,
+                        "memory_type": m.memory_type
                     })).collect::<Vec<_>>()
                 }))
             }
@@ -502,6 +560,51 @@ impl McpServer {
 
                 match brain.build_context(query, max_tokens, min_importance, namespace).await {
                     Ok(ctx) => Ok(ctx),
+                    Err(e) => Err(e.to_string()),
+                }
+            }
+
+            "memory_scratchpad_sync" => {
+                let params = request.params.unwrap_or_default();
+                let brain = &self.brain;
+                
+                let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
+                let task_id = params.get("task_id").and_then(|v| v.as_str()).unwrap_or("current");
+                let namespace = params.get("namespace").and_then(|v| v.as_str());
+                
+                if content.is_empty() {
+                    Err("Scratchpad content cannot be empty".to_string())
+                } else {
+                    // We use update_memory logic or just create a new one with a special tag
+                    // For scratchpad, we prioritize the latest entry.
+                    let tags = vec!["scratchpad".to_string(), format!("task:{}", task_id)];
+                    match brain.create_memory(content, 1.0, 0.0, 0.0, &tags, "scratchpad", "fact", None, namespace).await {
+                        Ok(memory) => Ok(serde_json::json!({"id": memory.id, "status": "synced"})),
+                        Err(e) => Err(e.to_string()),
+                    }
+                }
+            }
+
+            "memory_scratchpad_get" => {
+                let params = request.params.unwrap_or_default();
+                let brain = &self.brain;
+                let namespace = params.get("namespace").and_then(|v| v.as_str());
+                let task_id = params.get("task_id").and_then(|v| v.as_str()).unwrap_or("current");
+
+                // Search for the latest memory with 'scratchpad' tag
+                let query = format!("scratchpad task:{}", task_id);
+                match brain.search_memories(&query, 1, namespace).await {
+                    Ok(memories) => {
+                        if let Some(m) = memories.first() {
+                            Ok(serde_json::json!({
+                                "content": m.content,
+                                "id": m.id,
+                                "updated_at": m.updated_at
+                            }))
+                        } else {
+                            Ok(serde_json::json!({ "content": "", "status": "empty" }))
+                        }
+                    },
                     Err(e) => Err(e.to_string()),
                 }
             }

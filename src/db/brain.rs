@@ -103,7 +103,7 @@ pub struct ProcedureInput {
     pub trigger_keywords: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct SearchOptions {
     pub query: String,
     pub limit: Option<i64>,
@@ -112,6 +112,9 @@ pub struct SearchOptions {
     pub session_id: Option<String>,
     pub namespace: Option<String>,
     pub include_deleted: Option<bool>,
+    pub tags: Option<Vec<String>>,
+    pub memory_type: Option<String>,
+    pub min_importance: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,8 +379,8 @@ impl Brain {
         }
 
         let conn = Connection::open(db_path)?;
-        init_db(&conn)?;
         migrate_db(&conn)?;
+        init_db(&conn)?;
 
         let conn = Arc::new(Mutex::new(conn));
 
@@ -909,7 +912,7 @@ impl Brain {
             let mut scored: Vec<(Memory, f32)> = memories.into_iter().filter(|m| m.id != memory_id && m.deleted_at.is_none()).filter_map(|mem| {
                 if let Some(ref emb) = mem.embedding {
                     let similarity = cosine_similarity(&source_emb, emb);
-                    if similarity > 0.5 { return Some((mem, similarity)); }
+                    if similarity > 0.2 { return Some((mem, similarity)); }
                 }
                 None
             }).collect();
@@ -1128,6 +1131,23 @@ impl Brain {
         Ok(memories)
     }
 
+    pub async fn increment_access_count(&self, id: &str) -> Result<()> {
+        let conn = self.conn.clone();
+        let id = id.to_string();
+        let now = chrono::Utc::now().to_rfc3339();
+        
+        tokio::task::spawn_blocking(move || {
+            let conn = conn.blocking_lock();
+            conn.execute(
+                "UPDATE memories SET access_count = access_count + 1, last_accessed = ?1, updated_at = ?2 WHERE id = ?3",
+                params![now, now, id],
+            )?;
+            Ok::<_, rusqlite::Error>(())
+        }).await??;
+        
+        Ok(())
+    }
+
     pub async fn get_memory(&self, id: &str) -> Result<Memory> {
         let conn = self.conn.clone();
         let id = id.to_string();
@@ -1234,19 +1254,26 @@ impl Brain {
     }
 
     pub async fn embed_existing_memories(&self) -> Result<i64> {
-        if !self.has_embedder().await {
+        let embedder_model = {
+            let embedder_lock = self.embedder.read().await;
+            embedder_lock.as_ref().map(|e| e.model.clone())
+        };
+
+        if embedder_model.is_none() {
             return Ok(0);
         }
+        let current_model = embedder_model.unwrap();
 
-        // Get memories without embeddings
-        let memories_without_emb = {
+        // Get memories without embeddings or from different model
+        let memories_to_embed = {
             let conn = self.conn.clone();
+            let model_name = current_model.clone();
             tokio::task::spawn_blocking(move || {
                 let conn = conn.blocking_lock();
                 let mut stmt = conn.prepare(
-                    "SELECT id, content FROM memories WHERE embedding IS NULL AND deleted_at IS NULL"
+                    "SELECT id, content FROM memories WHERE (embedding IS NULL OR embedding_model != ?1) AND deleted_at IS NULL"
                 )?;
-                let rows = stmt.query_map([], |row| {
+                let rows = stmt.query_map([model_name], |row| {
                     Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                 })?;
                 rows.collect::<Result<Vec<_>, _>>()
@@ -1254,7 +1281,7 @@ impl Brain {
         };
 
         let mut count = 0;
-        for (id, content) in memories_without_emb {
+        for (id, content) in memories_to_embed {
             let embedder_opt = self.embedder.read().await.clone();
             if let Some(emb) = embedder_opt {
                 match emb.embed(&content).await {
@@ -1299,11 +1326,40 @@ impl Brain {
                 let namespace_str = namespace.to_string();
                 tokio::task::spawn_blocking(move || {
                     let conn = conn.blocking_lock();
-                    let pattern = format!("%{}%", query_str.to_lowercase());
-                    let mut stmt = conn.prepare(
-                        "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NULL AND namespace = ?1 AND LOWER(content) LIKE ?2 ORDER BY importance DESC LIMIT 50"
-                    )?;
-                    let rows = stmt.query_map(params![namespace_str, pattern], row_to_memory)?;
+                    
+                    // Improved keyword search: split query into tokens and match any
+                    let tokens: Vec<String> = query_str.to_lowercase()
+                        .split_whitespace()
+                        .filter(|w| w.len() > 2)
+                        .map(|w| format!("%{}%", w))
+                        .collect();
+
+                    if tokens.is_empty() {
+                        let mut stmt = conn.prepare(
+                            "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NULL AND namespace = ?1 ORDER BY importance DESC LIMIT 50"
+                        )?;
+                        let rows = stmt.query_map(params![namespace_str], row_to_memory)?;
+                        return rows.collect::<Result<Vec<_>, _>>();
+                    }
+
+                    // Build dynamic query for multiple tokens
+                    let mut query_base = "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NULL AND namespace = ?1 AND (".to_string();
+                    let mut conditions = Vec::new();
+                    for i in 0..tokens.len() {
+                        conditions.push(format!("LOWER(content) LIKE ?{}", i + 2));
+                    }
+                    query_base.push_str(&conditions.join(" OR "));
+                    query_base.push_str(") ORDER BY importance DESC LIMIT 50");
+
+                    let mut stmt = conn.prepare(&query_base)?;
+                    
+                    // Manual binding because of dynamic params
+                    let mut params_vec: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(namespace_str)];
+                    for t in tokens {
+                        params_vec.push(rusqlite::types::Value::Text(t));
+                    }
+                    
+                    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), row_to_memory)?;
                     rows.collect::<Result<Vec<_>, _>>()
                 }).await?
             }
@@ -1894,19 +1950,27 @@ impl Brain {
             // Ebbinghaus Forgetting Curve: R = exp(-t / S)
             // S (Stability) is increased by Active Recall (access_count)
             let stability_base = Self::get_stability_for_category(&memory.memory_type);
-            
+
             // Active Recall: each access significantly increases stability (logarithmic boost)
+            // reset the "t" to be relative to last_accessed if it exists
+            let last_active = memory.last_accessed.as_ref()
+                .and_then(|la| chrono::DateTime::parse_from_rfc3339(la).ok())
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+                .unwrap_or(created);
+
+            let t_hours = (now - last_active).num_hours() as f64;
+
             let active_recall_boost = if memory.access_count > 0 {
                 1.0 + (memory.access_count as f64).ln()
             } else {
                 1.0
             };
-            
+
             let stability = stability_base * active_recall_boost;
-            
-            // Calculate new importance using the exponential decay formula
-            let decay_factor = (-hours_since_creation / stability).exp();
-            
+
+            // Calculate new importance using the exponential decay formula from last active point
+            let decay_factor = (-t_hours / stability).exp();
+
             // Ensure importance doesn't drop too fast for highly important memories
             let new_importance = (memory.importance * decay_factor).clamp(0.01, 1.0);
 
@@ -1914,25 +1978,30 @@ impl Brain {
                 updates_to_apply.push((memory.id.clone(), new_importance));
                 updated += 1;
             }
-        }
-        
-        if !updates_to_apply.is_empty() {
+            }
+
+            if !updates_to_apply.is_empty() {
             let conn = self.conn.clone();
             let now_str = now.to_rfc3339();
             tokio::task::spawn_blocking(move || {
                 let mut conn = conn.blocking_lock();
                 let tx = conn.transaction()?;
-                for (id, new_imp) in updates_to_apply {
-                    tx.execute(
-                        "UPDATE memories SET importance = ?1, last_ranked = ?2, rank_source = 'ebbinghaus_v2', updated_at = ?3 WHERE id = ?4",
-                        rusqlite::params![new_imp, now_str, now_str, id],
+
+                // Use a prepared statement for the batch update
+                {
+                    let mut stmt = tx.prepare_cached(
+                        "UPDATE memories SET importance = ?1, last_ranked = ?2, rank_source = 'ebbinghaus_v3', updated_at = ?3 WHERE id = ?4"
                     )?;
+
+                    for (id, new_imp) in updates_to_apply {
+                        stmt.execute(rusqlite::params![new_imp, now_str, now_str, id])?;
+                    }
                 }
+
                 tx.commit()?;
                 Ok::<_, rusqlite::Error>(())
             }).await??;
-        }
-
+            }
         Ok(updated)
     }
 

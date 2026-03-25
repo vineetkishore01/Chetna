@@ -34,19 +34,6 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(config: Config) -> Result<Self> {
-        let embedder_config = if config.has_embedding() {
-            Some(db::embedding::EmbedderConfig {
-                provider: config.embedding_provider.clone(),
-                model: config.embedding_model.clone(),
-                api_key: config.embedding_api_key.clone(),
-                base_url: config.embedding_base_url.clone(),
-            })
-        } else {
-            None
-        };
-
-        let brain = Brain::new_with_embedder(&config.db_path, embedder_config)?;
-
         // Load user config from file with proper error handling
         let user_config = match UserConfig::load() {
             Ok(cfg) => {
@@ -61,6 +48,19 @@ impl AppState {
                 UserConfig::default()
             }
         };
+
+        let embedder_config = if config.has_embedding() || user_config.embedding_provider.is_some() {
+            Some(db::embedding::EmbedderConfig {
+                provider: user_config.embedding_provider.clone().unwrap_or(config.embedding_provider.clone()),
+                model: user_config.embedding_model.clone().unwrap_or(config.embedding_model.clone()),
+                api_key: user_config.api_key.clone().or(config.embedding_api_key.clone()),
+                base_url: user_config.embedding_base_url.clone().or(config.embedding_base_url.clone()),
+            })
+        } else {
+            None
+        };
+
+        let brain = Brain::new_with_embedder(&config.db_path, embedder_config)?;
 
         Ok(Self {
             brain: Arc::new(brain),

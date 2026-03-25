@@ -154,6 +154,10 @@ struct ListParams {
 
 async fn get_memory(State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>, axum::extract::Path(id): axum::extract::Path<String>) -> Result<Json<MemoryResponse>, String> {
     let memory = brain.get_memory(&id).await.map_err(|e| e.to_string())?;
+    
+    // Explicit access by ID is a strong indicator of relevance - increment count
+    let _ = brain.increment_access_count(&id).await;
+
     Ok(Json(MemoryResponse {
         id: memory.id,
         content: memory.content,

@@ -25,6 +25,7 @@ pub struct EmbeddingRequest {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OllamaResponse {
+    #[serde(alias = "embeddings")]
     pub embedding: Vec<f32>,
 }
 
@@ -84,6 +85,7 @@ impl Embedder {
             "text-embedding-3-small" => 1536,
             "text-embedding-3-large" => 3072,
             "text-embedding-ada-002" => 1536,
+            "qwen3-embedding:4b" => 2560,
             _ => 768,
         };
 
@@ -206,11 +208,11 @@ impl Embedder {
     async fn embed_openai(&self, text: &str) -> Result<Vec<f32>> {
         let (url, auth_header) = match self.provider {
             EmbeddingProvider::OpenAI => (
-                "https://api.openai.com/v1/embeddings",
+                format!("{}/v1/embeddings", self.base_url.trim_end_matches('/')),
                 format!("Bearer {}", self.api_key.as_ref().ok_or(anyhow!("OpenAI API key required"))?),
             ),
             EmbeddingProvider::OpenRouter => (
-                "https://openrouter.ai/api/v1/embeddings",
+                format!("{}/api/v1/embeddings", self.base_url.trim_end_matches('/')),
                 format!("Bearer {}", self.api_key.as_ref().ok_or(anyhow!("OpenRouter API key required"))?),
             ),
             _ => return Err(anyhow!("Invalid provider for OpenAI")),
