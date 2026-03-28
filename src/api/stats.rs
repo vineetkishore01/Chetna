@@ -20,8 +20,6 @@ pub struct StatsResponse {
     pub deleted_memories: i64,
     pub total_sessions: i64,
     pub active_sessions: i64,
-    pub total_skills: i64,
-    pub total_procedures: i64,
     pub avg_importance: f32,
     pub memory_types: std::collections::HashMap<String, i64>,
 }
@@ -33,8 +31,6 @@ async fn get_stats(State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock
         deleted_memories: 0,
         total_sessions: 0,
         active_sessions: 0,
-        total_skills: 0,
-        total_procedures: 0,
         avg_importance: 0.0,
         memory_types: std::collections::HashMap::new(),
     });

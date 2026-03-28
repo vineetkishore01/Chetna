@@ -171,18 +171,15 @@ impl Embedder {
 
     /// Create embeddings for multiple texts
     pub async fn embed_batch(&self, texts: &[String]) -> Result<Vec<Embedding>> {
-        let mut embeddings = Vec::new();
+        use futures::stream::{self, StreamExt};
         
-        for text in texts {
-            match self.embed(text).await {
-                Ok(emb) => embeddings.push(emb),
-                Err(e) => {
-                    tracing::warn!("Failed to embed text: {}", e);
-                }
-            }
-        }
+        let results = stream::iter(texts.iter())
+            .map(|text| self.embed(text))
+            .buffer_unordered(10) // Process up to 10 in parallel
+            .collect::<Vec<_>>()
+            .await;
         
-        Ok(embeddings)
+        Ok(results.into_iter().filter_map(|r| r.ok()).collect())
     }
 
     async fn embed_ollama(&self, text: &str) -> Result<Vec<f32>> {
@@ -310,10 +307,16 @@ impl Embedder {
                     .timeout(std::time::Duration::from_secs(3))
                     .send()
                     .await;
-                Ok(resp.is_ok() && resp.unwrap().status().is_success())
+                match resp {
+                    Ok(response) => Ok(response.status().is_success()),
+                    Err(_) => Ok(false),
+                }
             },
             EmbeddingProvider::OpenAI | EmbeddingProvider::OpenRouter | EmbeddingProvider::Google => {
-                if self.api_key.is_none() || self.api_key.as_ref().unwrap().is_empty() || self.api_key.as_deref() == Some("none") {
+                let has_api_key = self.api_key.as_ref()
+                    .map(|k| !k.is_empty() && k != "none")
+                    .unwrap_or(false);
+                if !has_api_key {
                     return Ok(false);
                 }
                 // Simple reachability check

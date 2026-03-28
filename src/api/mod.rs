@@ -2,12 +2,11 @@ pub mod memory;
 pub mod session;
 pub mod stats;
 pub mod auth;
-pub mod procedure;
-pub mod skill;
 pub mod error;
 pub mod config;
+pub mod history;
 
-use axum::{extract::State, Router, routing::{get, post}, Json, response::Sse};
+use axum::{extract::State, Router, routing::get, response::Sse};
 use futures::stream::Stream;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -53,12 +52,8 @@ pub fn create_router(
         .nest("/api/memory", memory::router(brain.clone()))
         .nest("/api/session", session::router(brain.clone()))
         .nest("/api/stats", stats::router(brain.clone()))
-        .nest("/api/procedure", procedure::router(brain.clone()))
-        .nest("/api/skill", skill::router(brain.clone()))
         .nest("/api/config", config::router())
-        .route("/api/config/cache", get(cache_stats).post(clear_cache))
-        .route("/api/memory/decay", post(run_decay))
-        .route("/api/memory/flush", post(flush_low_importance))
+        .nest("/api/history", history::router())
         .route("/api/status/connections", get(connection_status))
         .route("/api/status/stream", get(connection_status_stream))
         .route("/api/capabilities", get(capabilities))
@@ -102,21 +97,6 @@ async fn health(
         } else {
             "Running in keyword-only mode"
         }
-    }))
-}
-
-async fn cache_stats() -> axum::Json<serde_json::Value> {
-    // Session cache removed - was unused dead code
-    axum::Json(serde_json::json!({
-        "status": "disabled",
-        "note": "Session cache was removed as it was never utilized"
-    }))
-}
-
-async fn clear_cache() -> axum::Json<serde_json::Value> {
-    axum::Json(serde_json::json!({
-        "status": "cleared",
-        "note": "Cache is disabled"
     }))
 }
 
@@ -247,39 +227,4 @@ async fn capabilities(
             "mcp": "/mcp",
         }
     }))
-}
-
-async fn run_decay(
-    State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>,
-) -> axum::Json<serde_json::Value> {
-    match brain.apply_decay_formula().await {
-        Ok(count) => axum::Json(serde_json::json!({
-            "success": true,
-            "memories_updated": count,
-            "message": format!("Applied Ebbinghaus decay formula to {} memories", count)
-        })),
-        Err(e) => axum::Json(serde_json::json!({
-            "success": false,
-            "message": format!("Error: {}", e)
-        }))
-    }
-}
-
-async fn flush_low_importance(
-    State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>,
-    Json(req): Json<serde_json::Value>,
-) -> axum::Json<serde_json::Value> {
-    let threshold = req.get("threshold").and_then(|t| t.as_f64()).unwrap_or(0.1);
-
-    match brain.flush_low_importance(threshold).await {
-        Ok(count) => axum::Json(serde_json::json!({
-            "success": true,
-            "memories_deleted": count,
-            "message": format!("Flushed {} memories below importance {}", count, threshold)
-        })),
-        Err(e) => axum::Json(serde_json::json!({
-            "success": false,
-            "message": format!("Error: {}", e)
-        }))
-    }
 }

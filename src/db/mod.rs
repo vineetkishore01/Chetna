@@ -132,48 +132,6 @@ pub fn init_db(conn: &Connection) -> SqliteResult<()> {
         "#,
     )?;
     
-    // Create skills table
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS skills (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            code TEXT NOT NULL,
-            language TEXT NOT NULL DEFAULT 'text',
-            trigger_keywords TEXT NOT NULL DEFAULT '[]',
-            enabled INTEGER NOT NULL DEFAULT 1,
-            eligible INTEGER NOT NULL DEFAULT 1,
-            eligible_reason TEXT,
-            success_count INTEGER NOT NULL DEFAULT 0,
-            fail_count INTEGER NOT NULL DEFAULT 0,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        );
-        
-        CREATE INDEX IF NOT EXISTS idx_skills_enabled ON skills(enabled);
-        "#,
-    )?;
-    
-    // Create procedures table
-    conn.execute_batch(
-        r#"
-        CREATE TABLE IF NOT EXISTS procedures (
-            id TEXT PRIMARY KEY,
-            name TEXT NOT NULL,
-            description TEXT,
-            steps TEXT NOT NULL DEFAULT '[]',
-            trigger_keywords TEXT NOT NULL DEFAULT '[]',
-            success_count INTEGER NOT NULL DEFAULT 0,
-            fail_count INTEGER NOT NULL DEFAULT 0,
-            last_used TEXT,
-            created_at TEXT NOT NULL
-        );
-        
-        CREATE INDEX IF NOT EXISTS idx_procedures_name ON procedures(name);
-        "#,
-    )?;
-    
     // Create embedding cache table
     conn.execute_batch(
         r#"
@@ -229,6 +187,43 @@ pub fn init_db(conn: &Connection) -> SqliteResult<()> {
         
         CREATE INDEX IF NOT EXISTS idx_multimodal_memory ON multimodal_memories(memory_id);
         CREATE INDEX IF NOT EXISTS idx_multimodal_type ON multimodal_memories(content_type);
+        "#,
+    )?;
+
+    // Create history events table
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS history_events (
+            id TEXT PRIMARY KEY,
+            event_type TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            namespace TEXT NOT NULL DEFAULT 'default',
+            session_id TEXT,
+            metadata TEXT,
+            created_at TEXT NOT NULL
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_history_events_timestamp ON history_events(timestamp DESC);
+        CREATE INDEX IF NOT EXISTS idx_history_events_type ON history_events(event_type);
+        CREATE INDEX IF NOT EXISTS idx_history_events_namespace ON history_events(namespace);
+        "#,
+    )?;
+
+    // Create query results table
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS query_results (
+            id TEXT PRIMARY KEY,
+            event_id TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            rank INTEGER NOT NULL,
+            similarity_score REAL,
+            recall_score REAL,
+            FOREIGN KEY (event_id) REFERENCES history_events(id)
+        );
+        
+        CREATE INDEX IF NOT EXISTS idx_query_results_event ON query_results(event_id);
+        CREATE INDEX IF NOT EXISTS idx_query_results_memory ON query_results(memory_id);
         "#,
     )?;
     

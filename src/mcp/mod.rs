@@ -139,7 +139,9 @@ impl McpServer {
                     "query": {"type": "string", "description": "The context/query"},
                     "max_tokens": {"type": "number", "default": 4000},
                     "min_importance": {"type": "number", "default": 0.3},
-                    "namespace": {"type": "string", "description": "Optional namespace", "default": "default"}
+                    "min_similarity": {"type": "number", "default": 0.4},
+                    "namespace": {"type": "string", "description": "Optional namespace", "default": "default"},
+                    "session_id": {"type": "string", "description": "Optional session ID for working memory priming"}
                 },
                 "required": ["query"]
             }),
@@ -267,65 +269,6 @@ impl McpServer {
             }),
         });
 
-        tools.insert("skill_list".to_string(), McpTool {
-            name: "skill_list".to_string(),
-            description: "List all skills".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        });
-
-        tools.insert("skill_create".to_string(), McpTool {
-            name: "skill_create".to_string(),
-            description: "Create a new skill".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "description": {"type": "string"},
-                    "code": {"type": "string"},
-                    "language": {"type": "string", "default": "text"}
-                },
-                "required": ["name", "code"]
-            }),
-        });
-
-        tools.insert("skill_execute".to_string(), McpTool {
-            name: "skill_execute".to_string(),
-            description: "Execute a skill by name".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string"},
-                    "parameters": {"type": "object"}
-                },
-                "required": ["name"]
-            }),
-        });
-
-        tools.insert("procedure_list".to_string(), McpTool {
-            name: "procedure_list".to_string(),
-            description: "List all procedures".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        });
-
-        tools.insert("procedure_execute".to_string(), McpTool {
-            name: "procedure_execute".to_string(),
-            description: "Execute a procedure by ID".to_string(),
-            input_schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "id": {"type": "string"},
-                    "parameters": {"type": "object"}
-                },
-                "required": ["id"]
-            }),
-        });
-
         tools.insert("stats_get".to_string(), McpTool {
             name: "stats_get".to_string(),
             description: "Get memory system statistics".to_string(),
@@ -392,7 +335,7 @@ impl McpServer {
                         let memory_type = params.get("memory_type").and_then(|v| v.as_str()).unwrap_or("fact");
                         let category = params.get("category").and_then(|v| v.as_str()).unwrap_or("fact");
                         
-                        const CATEGORIES: &[&str] = &["fact", "preference", "rule", "experience", "skill_learned"];
+                        const CATEGORIES: &[&str] = &["fact", "preference", "rule", "experience"];
                         if !CATEGORIES.contains(&category) {
                             Err(format!("Invalid category '{}'. Valid options: {:?}", category, CATEGORIES))
                         } else {
@@ -427,9 +370,9 @@ impl McpServer {
                 let fetch_limit = if memory_type_filter.is_some() || tags_filter.is_some() || min_importance_filter.is_some() { limit * 10 } else { limit };
 
                 let mut memories = if semantic {
-                    brain.semantic_search(query, fetch_limit, 0.1, namespace).await.unwrap_or_default()
+                    brain.semantic_search(query, fetch_limit, 0.1, namespace, None).await.unwrap_or_default()
                 } else {
-                    brain.search_memories(query, fetch_limit, namespace).await.unwrap_or_default()
+                    brain.search_memories(query, fetch_limit, 0.1, namespace, None).await.unwrap_or_default()
                 };
 
                 // Apply filters
@@ -556,55 +499,12 @@ impl McpServer {
                 let query = params.get("query").and_then(|v| v.as_str()).unwrap_or("");
                 let max_tokens = params.get("max_tokens").and_then(|v| v.as_i64()).unwrap_or(4000);
                 let min_importance = params.get("min_importance").and_then(|v| v.as_f64()).unwrap_or(0.3) as f32;
+                let min_similarity = params.get("min_similarity").and_then(|v| v.as_f64()).unwrap_or(0.4) as f32;
                 let namespace = params.get("namespace").and_then(|v| v.as_str());
+                let session_id = params.get("session_id").and_then(|v| v.as_str());
 
-                match brain.build_context(query, max_tokens, min_importance, namespace).await {
+                match brain.build_context(query, max_tokens, min_importance, min_similarity, namespace, session_id).await {
                     Ok(ctx) => Ok(ctx),
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-
-            "memory_scratchpad_sync" => {
-                let params = request.params.unwrap_or_default();
-                let brain = &self.brain;
-                
-                let content = params.get("content").and_then(|v| v.as_str()).unwrap_or("");
-                let task_id = params.get("task_id").and_then(|v| v.as_str()).unwrap_or("current");
-                let namespace = params.get("namespace").and_then(|v| v.as_str());
-                
-                if content.is_empty() {
-                    Err("Scratchpad content cannot be empty".to_string())
-                } else {
-                    // We use update_memory logic or just create a new one with a special tag
-                    // For scratchpad, we prioritize the latest entry.
-                    let tags = vec!["scratchpad".to_string(), format!("task:{}", task_id)];
-                    match brain.create_memory(content, 1.0, 0.0, 0.0, &tags, "scratchpad", "fact", None, namespace).await {
-                        Ok(memory) => Ok(serde_json::json!({"id": memory.id, "status": "synced"})),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
-            }
-
-            "memory_scratchpad_get" => {
-                let params = request.params.unwrap_or_default();
-                let brain = &self.brain;
-                let namespace = params.get("namespace").and_then(|v| v.as_str());
-                let task_id = params.get("task_id").and_then(|v| v.as_str()).unwrap_or("current");
-
-                // Search for the latest memory with 'scratchpad' tag
-                let query = format!("scratchpad task:{}", task_id);
-                match brain.search_memories(&query, 1, namespace).await {
-                    Ok(memories) => {
-                        if let Some(m) = memories.first() {
-                            Ok(serde_json::json!({
-                                "content": m.content,
-                                "id": m.id,
-                                "updated_at": m.updated_at
-                            }))
-                        } else {
-                            Ok(serde_json::json!({ "content": "", "status": "empty" }))
-                        }
-                    },
                     Err(e) => Err(e.to_string()),
                 }
             }
@@ -751,92 +651,12 @@ impl McpServer {
                 }))
             }
             
-            "skill_list" => {
-                let brain = &self.brain;
-                let skills = brain.list_skills().await.unwrap_or_default();
-                Ok(serde_json::json!({
-                    "skills": skills.iter().map(|s| serde_json::json!({
-                        "id": s.id,
-                        "name": s.name,
-                        "description": s.description,
-                        "enabled": s.enabled
-                    })).collect::<Vec<_>>()
-                }))
-            }
-            
-            "skill_create" => {
-                let params = request.params.unwrap_or_default();
-                let brain = &self.brain;
-                
-                let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("").trim();
-                if name.is_empty() {
-                    Err("Skill name cannot be empty".to_string())
-                } else {
-                    let description = params.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                    let code = params.get("code").and_then(|v| v.as_str()).unwrap_or("");
-                    let language = params.get("language").and_then(|v| v.as_str()).unwrap_or("text");
-                    
-                    match brain.create_skill(name, description, code, language).await {
-                        Ok(id) => Ok(serde_json::json!({"id": id, "status": "created"})),
-                        Err(e) => Err(e.to_string()),
-                    }
-                }
-            }
-            
-            "skill_execute" => {
-                let params = request.params.unwrap_or_default();
-                let brain = &self.brain;
-                
-                let name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                
-                // Find skill by name and execute
-                let skills = brain.list_skills().await.unwrap_or_default();
-                if let Some(skill) = skills.iter().find(|s| s.name == name) {
-                    Ok(serde_json::json!({
-                        "status": "executed",
-                        "skill": skill.name,
-                        "code": skill.code,
-                        "result": "Skill executed successfully"
-                    }))
-                } else {
-                    Err(format!("Skill not found: {}", name))
-                }
-            }
-            
-            "procedure_list" => {
-                let brain = &self.brain;
-                let procedures = brain.list_procedures().await.unwrap_or_default();
-                Ok(serde_json::json!({
-                    "procedures": procedures.iter().map(|p| serde_json::json!({
-                        "id": p.id,
-                        "name": p.name,
-                        "description": p.description,
-                        "steps": p.steps
-                    })).collect::<Vec<_>>()
-                }))
-            }
-            
-            "procedure_execute" => {
-                let params = request.params.unwrap_or_default();
-                let brain = &self.brain;
-                
-                let id_str = params.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let parameters = params.get("parameters").cloned().unwrap_or(serde_json::json!({}));
-
-                match brain.execute_procedure(id_str, parameters).await {
-                    Ok(result) => Ok(result),
-                    Err(e) => Err(e.to_string()),
-                }
-            }
-            
             "stats_get" => {
                 let brain = &self.brain;
                 match brain.get_stats().await {
                     Ok(stats) => Ok(serde_json::json!({
                         "total_memories": stats.total_memories,
                         "total_sessions": stats.total_sessions,
-                        "total_skills": stats.total_skills,
-                        "total_procedures": stats.total_procedures,
                         "avg_importance": stats.avg_importance
                     })),
                     Err(e) => Err(e.to_string()),
@@ -855,7 +675,7 @@ impl McpServer {
                     Err(e) => Err(e.to_string()),
                 }
             }
-            
+
             _ => {
                 Err(format!("Unknown method: {}", request.method))
             }

@@ -9,12 +9,15 @@ use axum::{
 use std::sync::Arc;
 use crate::{Brain, config_file::UserConfig};
 
+pub mod history;
+
 pub fn routes() -> Router<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)> {
     Router::new()
         .route("/", get(dashboard))
         .route("/memories", get(memories_page))
         .route("/sessions", get(sessions_page))
         .route("/settings", get(settings_page))
+        .nest("/history", history::routes())
 }
 
 const STYLE: &str = r#"
@@ -183,6 +186,7 @@ fn layout(content: &str, active_tab: &str) -> String {
             <a href="/" class="{}">Dashboard</a>
             <a href="/memories" class="{}">Memories</a>
             <a href="/sessions" class="{}">Sessions</a>
+            <a href="/history" class="{}">History</a>
             <a href="/settings" class="{}">Settings</a>
         </nav>
     </header>
@@ -196,9 +200,16 @@ fn layout(content: &str, active_tab: &str) -> String {
     <script>
         async function checkHealth() {{
             try {{
+                console.log('Health check: fetching /api/config/health...');
                 const resp = await fetch('/api/config/health');
-                if (!resp.ok) throw new Error('Health check failed');
+                console.log('Health check response:', resp.status, resp.statusText);
+                if (!resp.ok) {{
+                    const errText = await resp.text();
+                    console.error('Health check error:', errText);
+                    throw new Error('Health check failed: ' + resp.status);
+                }}
                 const data = await resp.json();
+                console.log('Health data:', data);
                 const dot = document.getElementById('statusDot');
                 const text = document.getElementById('statusText');
                 
@@ -210,11 +221,11 @@ fn layout(content: &str, active_tab: &str) -> String {
                     text.innerText = 'Provider Disconnected';
                 }}
             }} catch (e) {{
+                console.error('Health check exception:', e);
                 const dot = document.getElementById('statusDot');
                 const text = document.getElementById('statusText');
                 dot.className = 'status-dot offline';
                 text.innerText = 'API Offline';
-                console.error(e);
             }}
         }}
 
@@ -235,6 +246,7 @@ fn layout(content: &str, active_tab: &str) -> String {
     if active_tab == "dashboard" { "active" } else { "" },
     if active_tab == "memories" { "active" } else { "" },
     if active_tab == "sessions" { "active" } else { "" },
+    if active_tab == "history" { "active" } else { "" },
     if active_tab == "settings" { "active" } else { "" },
     content)
 }
@@ -282,7 +294,8 @@ async fn dashboard() -> Html<String> {
         <div id="dashboardView" style="display: none;">
             <div class="command-bar">
                 <span style="color: #555;">🔍</span>
-                <input type="text" class="command-input" id="mainSearch" placeholder="Search across all memories..." onkeyup="handleSearch(event)">
+                <input type="text" class="command-input" id="mainSearch" placeholder="Search across all memories..." onkeydown="handleSearch(event)">
+                <button class="btn btn-primary" onclick="performSearch()" style="padding: 0.5rem 1rem; font-size: 0.9rem;">Search</button>
             </div>
 
             <div class="grid">
@@ -295,8 +308,8 @@ async fn dashboard() -> Html<String> {
                     <div class="value" id="countRecall">0</div>
                 </div>
                 <div class="stat-box">
-                    <div class="label">Skills & Procedures</div>
-                    <div class="value" id="countSkills">0</div>
+                    <div class="label">Active Sessions</div>
+                    <div class="value" id="countRecall">0</div>
                 </div>
             </div>
 
@@ -314,9 +327,16 @@ async fn dashboard() -> Html<String> {
 
             async function init() {
                 try {
+                    console.log('Fetching /api/config...');
                     const resp = await fetch('/api/config');
-                    if (!resp.ok) throw new Error('Failed to load config');
+                    console.log('Response status:', resp.status, resp.statusText);
+                    if (!resp.ok) {
+                        const errText = await resp.text();
+                        console.error('Response error body:', errText);
+                        throw new Error('Failed to load config: ' + resp.status + ' ' + errText);
+                    }
                     config = await resp.json();
+                    console.log('Config loaded:', config);
                     
                     if (!config.provider || (config.provider === 'ollama' && !config.base_url)) {
                         showOnboarding();
@@ -425,14 +445,58 @@ async fn dashboard() -> Html<String> {
                     const data = await resp.json();
                     document.getElementById('countMemories').innerText = data.total_memories || 0;
                     document.getElementById('countRecall').innerText = data.total_sessions || 0;
-                    document.getElementById('countSkills').innerText = (data.total_skills || 0) + (data.total_procedures || 0);
                 } catch (e) {
                     console.error("Load stats failed", e);
                 }
             }
 
             let searchTimeout = null;
+            
+            async function performSearch() {
+                const query = document.getElementById('mainSearch').value;
+                if (query.length < 3) {
+                    document.getElementById('searchResults').innerHTML = '';
+                    return;
+                }
+                
+                try {
+                    const resp = await fetch(`/api/memory/search?query=${encodeURIComponent(query)}&limit=10`);
+                    const memories = await resp.json();
+                    
+                    const container = document.getElementById('searchResults');
+                    if (memories.length === 0) {
+                        container.innerHTML = '<div style="color: #444; text-align: center; padding: 2rem;">No matching memories found.</div>';
+                        return;
+                    }
+                    
+                    container.innerHTML = `
+                        <h3 style="margin-bottom: 1rem; font-size: 0.9rem; color: #888;">Search Results</h3>
+                        ${memories.map(m => `
+                            <div style="background: #0a0a0a; padding: 1.25rem; border-radius: 10px; margin-bottom: 0.75rem; border: 1px solid #222; transition: border-color 0.2s;" onmouseover="this.style.borderColor='#444'" onmouseout="this.style.borderColor='#222'">
+                                <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
+                                    <span style="font-size: 0.65rem; background: #1a1a1a; color: #888; padding: 0.2rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em;">${m.category}</span>
+                                    <span style="font-size: 0.65rem; color: #444;">${new Date(m.created_at).toLocaleDateString()}</span>
+                                </div>
+                                <div style="font-size: 0.95rem; color: #eee; line-height: 1.5;">${m.content}</div>
+                                ${m.tags && m.tags.length > 0 ? `
+                                    <div style="margin-top: 0.75rem; display: flex; gap: 0.4rem; flex-wrap: wrap;">
+                                        ${m.tags.map(t => `<span style="font-size: 0.6rem; color: #555; border: 1px solid #222; padding: 0.1rem 0.4rem; border-radius: 3px;">#${t}</span>`).join('')}
+                                    </div>
+                                ` : ''}
+                            </div>
+                        `).join('')}
+                    `;
+                } catch (e) {
+                    console.error("Search failed", e);
+                }
+            }
+            
             async function handleSearch(event) {
+                if (event.key === 'Enter') {
+                    performSearch();
+                    return;
+                }
+                
                 const query = event.target.value;
                 if (query.length < 3) {
                     document.getElementById('searchResults').innerHTML = '';
@@ -441,38 +505,7 @@ async fn dashboard() -> Html<String> {
                 
                 if (searchTimeout) clearTimeout(searchTimeout);
                 
-                searchTimeout = setTimeout(async () => {
-                    try {
-                        const resp = await fetch(`/api/memory/search?query=${encodeURIComponent(query)}&limit=10`);
-                        const memories = await resp.json();
-                        
-                        const container = document.getElementById('searchResults');
-                        if (memories.length === 0) {
-                            container.innerHTML = '<div style="color: #444; text-align: center; padding: 2rem;">No matching memories found.</div>';
-                            return;
-                        }
-                        
-                        container.innerHTML = `
-                            <h3 style="margin-bottom: 1rem; font-size: 0.9rem; color: #888;">Search Results</h3>
-                            ${memories.map(m => `
-                                <div style="background: #0a0a0a; padding: 1.25rem; border-radius: 10px; margin-bottom: 0.75rem; border: 1px solid #222; transition: border-color 0.2s;" onmouseover="this.style.borderColor='#444'" onmouseout="this.style.borderColor='#222'">
-                                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 0.5rem;">
-                                        <span style="font-size: 0.65rem; background: #1a1a1a; color: #888; padding: 0.2rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em;">${m.category}</span>
-                                        <span style="font-size: 0.65rem; color: #444;">${new Date(m.created_at).toLocaleDateString()}</span>
-                                    </div>
-                                    <div style="font-size: 0.95rem; color: #eee; line-height: 1.5;">${m.content}</div>
-                                    ${m.tags && m.tags.length > 0 ? `
-                                        <div style="margin-top: 0.75rem; display: flex; gap: 0.4rem; flex-wrap: wrap;">
-                                            ${m.tags.map(t => `<span style="font-size: 0.6rem; color: #555; border: 1px solid #222; padding: 0.1rem 0.4rem; border-radius: 3px;">#${t}</span>`).join('')}
-                                        </div>
-                                    ` : ''}
-                                </div>
-                            `).join('')}
-                        `;
-                    } catch (e) {
-                        console.error("Search failed", e);
-                    }
-                }, 300);
+                searchTimeout = setTimeout(performSearch, 300);
             }
 
             init();
@@ -513,8 +546,8 @@ async fn memories_page() -> Html<String> {
 
 async fn sessions_page() -> Html<String> {
     let content = r#"
-        <h2>Sessions</h2>
-        <p style="color: #888; margin-bottom: 2rem;">Active thought streams and conversation history.</p>
+        <h2>Active Agents & Sessions</h2>
+        <p style="color: #888; margin-bottom: 2rem;">View all agents using Chetna and their active memory sessions.</p>
         <div id="sessionsList" class="grid"></div>
         
         <script>
@@ -523,17 +556,53 @@ async fn sessions_page() -> Html<String> {
                     const resp = await fetch('/api/session');
                     const data = await resp.json();
                     const container = document.getElementById('sessionsList');
-                    container.innerHTML = data.map(s => `
-                        <div class="stat-box">
-                            <div class="label">Session ${s.id.substring(0,8)}</div>
-                            <div class="value" style="font-size: 0.9rem;">${s.summary || 'Active session'}</div>
+                    
+                    if (data.length === 0) {
+                        container.innerHTML = '<div style="color: #888; text-align: center; padding: 2rem;">No active sessions. Agents can register by creating sessions via the API.</div>';
+                        return;
+                    }
+                    
+                    // Group by agent_id
+                    const agentGroups = {};
+                    data.forEach(s => {
+                        const agentId = s.agent_id || 'unknown';
+                        if (!agentGroups[agentId]) {
+                            agentGroups[agentId] = {
+                                agent_id: agentId,
+                                sessions: []
+                            };
+                        }
+                        agentGroups[agentId].sessions.push(s);
+                    });
+                    
+                    container.innerHTML = Object.values(agentGroups).map(group => `
+                        <div class="stat-box" style="border-left: 4px solid #4CAF50;">
+                            <div class="label" style="font-size: 1rem; font-weight: 600; margin-bottom: 0.5rem;">
+                                🤖 Agent: ${group.agent_id}
+                            </div>
+                            <div style="font-size: 0.85rem; color: #888; margin-bottom: 0.5rem;">
+                                ${group.sessions.length} active session${group.sessions.length > 1 ? 's' : ''}
+                            </div>
+                            <div style="margin-top: 0.5rem;">
+                                ${group.sessions.map(s => `
+                                    <div style="padding: 0.5rem; background: rgba(255,255,255,0.05); border-radius: 4px; margin-bottom: 0.25rem; font-size: 0.8rem;">
+                                        <div style="color: #aaa;">Session: ${s.id.substring(0,8)}</div>
+                                        <div style="color: #888;">${s.name || 'Unnamed'}</div>
+                                        ${s.project ? `<div style="color: #666;">📁 ${s.project}</div>` : ''}
+                                        <div style="color: #666; font-size: 0.75rem;">Started: ${new Date(s.started_at).toLocaleString()}</div>
+                                    </div>
+                                `).join('')}
+                            </div>
                         </div>
                     `).join('');
                 } catch (e) {
                     console.error("Load sessions failed", e);
+                    document.getElementById('sessionsList').innerHTML = '<div style="color: #f44; text-align: center; padding: 2rem;">Failed to load sessions</div>';
                 }
             }
             loadSessions();
+            // Auto-refresh every 30 seconds
+            setInterval(loadSessions, 30000);
         </script>
     "#;
     Html(layout(content, "sessions"))

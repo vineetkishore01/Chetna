@@ -4,6 +4,7 @@
 //! the best of Wolverine's intelligent memory management and Engram's
 //! battle-tested architecture.
 
+pub mod cache;
 pub mod db;
 pub mod api;
 pub mod mcp;
@@ -12,6 +13,7 @@ pub mod config;
 pub mod config_file;
 pub mod scheduler;
 pub mod shared;
+pub mod history;
 
 pub use db::brain::{Brain, RecallWeights};
 pub use config::Config;
@@ -37,7 +39,10 @@ impl AppState {
         // Load user config from file with proper error handling
         let user_config = match UserConfig::load() {
             Ok(cfg) => {
-                info!("✅ User config loaded from {}", UserConfig::config_path().display());
+                match UserConfig::config_path() {
+                    Ok(path) => info!("✅ User config loaded from {}", path.display()),
+                    Err(e) => tracing::warn!("Failed to get config path: {}", e),
+                }
                 cfg
             }
             Err(e) => {

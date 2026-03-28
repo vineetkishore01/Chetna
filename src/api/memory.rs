@@ -6,7 +6,7 @@ use axum::{
 };
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
-use crate::{Brain, config_file::UserConfig, db::brain::{RecallWeights, CATEGORIES}};
+use crate::{Brain, config_file::UserConfig, db::brain::CATEGORIES};
 use tracing::error;
 
 const MAX_CONTENT_LENGTH: usize = 50_000;
@@ -26,15 +26,11 @@ pub fn router(_brain: Arc<Brain>) -> Router<(Arc<Brain>, Arc<tokio::sync::RwLock
         .route("/:id", get(get_memory).delete(delete_memory).patch(update_memory))
         .route("/search", get(search_memories).post(search_memories_post))
         .route("/search/semantic", get(semantic_search))
-        .route("/search/explain", get(search_explain).post(search_explain_post))
         .route("/related/:id", get(get_related_memories))
         .route("/prune", post(prune_memories))
         .route("/context", post(build_context))
-        .route("/embed-batch", post(embed_existing_memories))
         .route("/pin/:id", post(pin_memory).delete(unpin_memory))
         .route("/category/:id", post(set_memory_category))
-        .route("/restore/:id", post(restore_memory))
-        .route("/deleted", get(list_deleted_memories))
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -103,8 +99,10 @@ pub struct SearchRequest {
 pub struct ContextRequest {
     pub query: String,
     pub max_tokens: Option<i64>,
-    pub include_importance: Option<f32>,
+    pub min_importance: Option<f32>,
+    pub min_similarity: Option<f32>,
     pub namespace: Option<String>,
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -382,7 +380,8 @@ async fn search_memories(
     Query(params): Query<SearchRequest>,
 ) -> Result<Json<Vec<MemoryResponse>>, StatusCode> {
     let limit = params.limit.unwrap_or(20);
-    let memories = brain.search_memories(&params.query, limit, params.namespace.as_deref()).await.map_err(map_err)?;
+    let min_sim = params.min_similarity.unwrap_or(0.1);
+    let memories = brain.search_memories(&params.query, limit, min_sim, params.namespace.as_deref(), None).await.map_err(map_err)?;
 
     Ok(Json(memories.into_iter().map(|m| MemoryResponse {
         id: m.id,
@@ -409,7 +408,8 @@ async fn search_memories_post(
     Json(req): Json<SearchRequest>,
 ) -> Result<Json<Vec<MemoryResponse>>, StatusCode> {
     let limit = req.limit.unwrap_or(20);
-    let memories = brain.search_memories(&req.query, limit, req.namespace.as_deref()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let min_sim = req.min_similarity.unwrap_or(0.1);
+    let memories = brain.search_memories(&req.query, limit, min_sim, req.namespace.as_deref(), None).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(memories.into_iter().map(|m| MemoryResponse {
         id: m.id,
@@ -438,7 +438,7 @@ async fn semantic_search(
     let limit = params.limit.unwrap_or(20);
     let min_sim = params.min_similarity.unwrap_or(0.1);
 
-    let memories = brain.semantic_search(&params.query, limit, min_sim, params.namespace.as_deref()).await.map_err(map_err)?;
+    let memories = brain.semantic_search(&params.query, limit, min_sim, params.namespace.as_deref(), None).await.map_err(map_err)?;
 
     Ok(Json(memories.into_iter().map(|m| MemoryResponse {
         id: m.id,
@@ -458,168 +458,6 @@ async fn semantic_search(
         last_ranked: m.last_ranked,
         rank_source: m.rank_source,
     }).collect()))
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SearchExplainRequest {
-    pub query: String,
-    pub limit: Option<i64>,
-    pub min_similarity: Option<f32>,
-    pub weights: Option<RecallWeights>,
-    pub namespace: Option<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct SearchExplainResponse {
-    pub memories: Vec<MemoryResponse>,
-    pub explanation: Vec<RecallExplanation>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct RecallExplanation {
-    pub memory_id: String,
-    pub total_score: f32,
-    pub breakdown: ScoreBreakdownResponse,
-    pub factors: FactorsResponse,
-    pub weights_used: WeightsResponse,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ScoreBreakdownResponse {
-    pub similarity: f32,
-    pub importance: f32,
-    pub recency: f32,
-    pub access_frequency: f32,
-    pub emotional: f32,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct FactorsResponse {
-    pub is_pinned: bool,
-    pub hours_old: i64,
-    pub access_count: i64,
-    pub memory_type: String,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-pub struct WeightsResponse {
-    pub similarity: f32,
-    pub importance: f32,
-    pub recency: f32,
-    pub access_frequency: f32,
-    pub emotional: f32,
-}
-
-async fn search_explain(
-    State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>,
-    Query(params): Query<SearchExplainRequest>,
-) -> Result<Json<SearchExplainResponse>, StatusCode> {
-    let limit = params.limit.unwrap_or(20);
-    let min_sim = params.min_similarity.unwrap_or(0.1);  // Lowered from 0.3 - qwen3-embedding produces lower similarity scores
-
-    let results = brain.semantic_search_with_explanation(&params.query, limit, min_sim, params.weights, params.namespace.as_deref()).await.map_err(map_err)?;
-
-    let memories: Vec<MemoryResponse> = results.iter().map(|r| MemoryResponse {
-        id: r.memory.id.clone(),
-        content: r.memory.content.clone(),
-        importance: r.memory.importance,
-        emotional_tone: r.memory.emotional_tone,
-        arousal: r.memory.arousal,
-        tags: r.memory.tags.clone(),
-        memory_type: r.memory.memory_type.clone(),
-        category: r.memory.category.clone(),
-        embedding_model: r.memory.embedding_model.clone(),
-        access_count: r.memory.access_count,
-        created_at: r.memory.created_at.clone(),
-        updated_at: r.memory.updated_at.clone(),
-        is_pinned: r.memory.is_pinned,
-        memory_category: r.memory.memory_category.clone(),
-        last_ranked: r.memory.last_ranked.clone(),
-        rank_source: r.memory.rank_source.clone(),
-    }).collect();
-
-    let explanation: Vec<RecallExplanation> = results.iter().map(|r| RecallExplanation {
-        memory_id: r.memory.id.clone(),
-        total_score: r.total_score,
-        breakdown: ScoreBreakdownResponse {
-            similarity: r.breakdown.similarity,
-            importance: r.breakdown.importance,
-            recency: r.breakdown.recency,
-            access_frequency: r.breakdown.access_frequency,
-            emotional: r.breakdown.emotional,
-        },
-        factors: FactorsResponse {
-            is_pinned: r.factors.is_pinned,
-            hours_old: r.factors.hours_old,
-            access_count: r.factors.access_count,
-            memory_type: r.factors.memory_type.clone(),
-        },
-        weights_used: WeightsResponse {
-            similarity: r.weights_used.similarity,
-            importance: r.weights_used.importance,
-            recency: r.weights_used.recency,
-            access_frequency: r.weights_used.access_frequency,
-            emotional: r.weights_used.emotional,
-        },
-    }).collect();
-
-    Ok(Json(SearchExplainResponse { memories, explanation }))
-}
-
-async fn search_explain_post(
-    State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>,
-    Json(req): Json<SearchExplainRequest>,
-) -> Result<Json<SearchExplainResponse>, StatusCode> {
-    let limit = req.limit.unwrap_or(20);
-    let min_sim = req.min_similarity.unwrap_or(0.1);  // Lowered from 0.3 - qwen3-embedding produces lower similarity scores
-
-    let results = brain.semantic_search_with_explanation(&req.query, limit, min_sim, req.weights, req.namespace.as_deref()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let memories: Vec<MemoryResponse> = results.iter().map(|r| MemoryResponse {
-        id: r.memory.id.clone(),
-        content: r.memory.content.clone(),
-        importance: r.memory.importance,
-        emotional_tone: r.memory.emotional_tone,
-        arousal: r.memory.arousal,
-        tags: r.memory.tags.clone(),
-        memory_type: r.memory.memory_type.clone(),
-        category: r.memory.category.clone(),
-        embedding_model: r.memory.embedding_model.clone(),
-        access_count: r.memory.access_count,
-        created_at: r.memory.created_at.clone(),
-        updated_at: r.memory.updated_at.clone(),
-        is_pinned: r.memory.is_pinned,
-        memory_category: r.memory.memory_category.clone(),
-        last_ranked: r.memory.last_ranked.clone(),
-        rank_source: r.memory.rank_source.clone(),
-    }).collect();
-
-    let explanation: Vec<RecallExplanation> = results.iter().map(|r| RecallExplanation {
-        memory_id: r.memory.id.clone(),
-        total_score: r.total_score,
-        breakdown: ScoreBreakdownResponse {
-            similarity: r.breakdown.similarity,
-            importance: r.breakdown.importance,
-            recency: r.breakdown.recency,
-            access_frequency: r.breakdown.access_frequency,
-            emotional: r.breakdown.emotional,
-        },
-        factors: FactorsResponse {
-            is_pinned: r.factors.is_pinned,
-            hours_old: r.factors.hours_old,
-            access_count: r.factors.access_count,
-            memory_type: r.factors.memory_type.clone(),
-        },
-        weights_used: WeightsResponse {
-            similarity: r.weights_used.similarity,
-            importance: r.weights_used.importance,
-            recency: r.weights_used.recency,
-            access_frequency: r.weights_used.access_frequency,
-            emotional: r.weights_used.emotional,
-        },
-    }).collect();
-
-    Ok(Json(SearchExplainResponse { memories, explanation }))
 }
 
 async fn get_related_memories(
@@ -665,19 +503,12 @@ async fn build_context(
     Json(req): Json<ContextRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let max_tokens = req.max_tokens.unwrap_or(4000);
-    let include_importance = req.include_importance.unwrap_or(0.3);
+    let min_importance = req.min_importance.unwrap_or(0.3);
+    let min_similarity = req.min_similarity.unwrap_or(0.4);
 
-    let result = brain.build_context(&req.query, max_tokens, include_importance, req.namespace.as_deref()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let result = brain.build_context(&req.query, max_tokens, min_importance, min_similarity, req.namespace.as_deref(), req.session_id.as_deref()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(result))
-}
-
-async fn embed_existing_memories(State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>) -> Result<Json<serde_json::Value>, StatusCode> {
-    let count = brain.embed_existing_memories().await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(serde_json::json!({
-        "embedded": count,
-        "status": "ok"
-    })))
 }
 
 async fn pin_memory(
@@ -750,37 +581,3 @@ async fn update_memory(
     }
 }
 
-async fn restore_memory(
-    State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>,
-    axum::extract::Path(id): axum::extract::Path<String>,
-) -> Result<Json<serde_json::Value>, String> {
-    brain.restore_memory(&id).await.map_err(|e| e.to_string())?;
-    Ok(Json(serde_json::json!({"success": true, "message": "Memory restored"})))
-}
-
-async fn list_deleted_memories(
-    State((brain, _)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>,
-    Query(params): Query<ListParams>,
-) -> Result<Json<Vec<MemoryResponse>>, StatusCode> {
-    let limit = params.limit.unwrap_or(100);
-    let memories = brain.list_deleted_memories(limit, params.namespace.as_deref()).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(memories.into_iter().map(|m| MemoryResponse {
-        id: m.id,
-        content: m.content,
-        importance: m.importance,
-        emotional_tone: m.emotional_tone,
-        arousal: m.arousal,
-        tags: m.tags,
-        memory_type: m.memory_type,
-        category: m.category,
-        embedding_model: m.embedding_model,
-        access_count: m.access_count,
-        created_at: m.created_at,
-        updated_at: m.updated_at,
-        is_pinned: m.is_pinned,
-        memory_category: m.memory_category,
-        last_ranked: m.last_ranked,
-        rank_source: m.rank_source,
-    }).collect()))
-}

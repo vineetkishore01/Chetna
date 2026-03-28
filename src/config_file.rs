@@ -3,7 +3,7 @@
 //! This module handles saving and loading configuration to a JSON file
 //! so that settings persist across restarts.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -23,13 +23,30 @@ pub struct UserConfig {
 
 impl UserConfig {
     /// Get the config file path
-    pub fn config_path() -> PathBuf {
-        Path::new("ChetnaData").join("config.json")
+    pub fn config_path() -> Result<PathBuf> {
+        let path = Path::new("ChetnaData").join("config.json");
+
+        // Validate path doesn't escape intended directory
+        let canonical = path
+            .canonicalize()
+            .map_err(|e| anyhow!("Invalid config path: {}", e))?;
+
+        let base = std::env::current_dir()
+            .map_err(|e| anyhow!("Failed to get current directory: {}", e))?
+            .join("ChetnaData")
+            .canonicalize()
+            .map_err(|e| anyhow!("Invalid base directory: {}", e))?;
+
+        if !canonical.starts_with(&base) {
+            return Err(anyhow!("Config path escapes intended directory"));
+        }
+
+        Ok(path)
     }
 
     /// Load configuration from file
     pub fn load() -> Result<Self> {
-        let path = Self::config_path();
+        let path = Self::config_path()?;
         if !path.exists() {
             return Ok(Self::default());
         }
@@ -41,7 +58,7 @@ impl UserConfig {
 
     /// Save configuration to file
     pub fn save(&self) -> Result<()> {
-        let path = Self::config_path();
+        let path = Self::config_path()?;
 
         // Ensure directory exists
         if let Some(parent) = path.parent() {

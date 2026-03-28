@@ -108,6 +108,16 @@ impl Scheduler {
                         }
                     }
                 }
+
+                // Cleanup old history events (30-day retention)
+                match brain.cleanup_old_history(30).await {
+                    Ok(count) => {
+                        info!("   Cleaned up {} old history events", count);
+                    }
+                    Err(e) => {
+                        warn!("   History cleanup failed: {}", e);
+                    }
+                }
             }
 
             // Reset running flag on exit so scheduler can be restarted

@@ -2,6 +2,7 @@ use axum::{
     extract::State,
     routing::{get, post},
     Json, Router,
+    http::StatusCode,
 };
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
@@ -9,7 +10,7 @@ use crate::{Brain, config_file::UserConfig, db::embedding::EmbedderConfig};
 
 pub fn router() -> Router<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)> {
     Router::new()
-        .route("/", get(get_config).post(update_config))
+        .route("/", get(get_config_handler).post(update_config_handler))
         .route("/health", get(check_health))
         .route("/ping", post(ping_provider))
 }
@@ -34,7 +35,7 @@ pub struct UpdateConfigRequest {
 
 async fn ping_provider(
     Json(req): Json<UpdateConfigRequest>,
-) -> Json<serde_json::Value> {
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
     let embed_config = EmbedderConfig {
         provider: req.provider.clone(),
         model: req.model.clone(),
@@ -44,7 +45,10 @@ async fn ping_provider(
     
     // Create a temporary embedder just to test connection
     // We don't need a DB connection for a ping
-    let temp_conn = Arc::new(tokio::sync::Mutex::new(rusqlite::Connection::open_in_memory().unwrap()));
+    let temp_conn = Arc::new(tokio::sync::Mutex::new(
+        rusqlite::Connection::open_in_memory()
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("Failed to create in-memory DB: {}", e)))?
+    ));
     
     match crate::db::embedding::Embedder::new(
         embed_config.provider(),
@@ -55,29 +59,32 @@ async fn ping_provider(
     ) {
         Ok(embedder) => {
             let connected = embedder.check_connection().await.unwrap_or(false);
-            Json(serde_json::json!({
+            Ok(Json(serde_json::json!({
                 "success": connected,
                 "message": if connected { "Connection successful" } else { "Could not reach provider" }
-            }))
+            })))
         },
-        Err(e) => Json(serde_json::json!({"success": false, "message": e.to_string()}))
+        Err(e) => Ok(Json(serde_json::json!({"success": false, "message": e.to_string()})))
     }
 }
 
-async fn get_config(
+pub async fn get_config_handler(
     State((_, user_config)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>,
 ) -> Json<ConfigResponse> {
+    tracing::info!("API: get_config called");
     let config = user_config.read().await;
-    Json(ConfigResponse {
+    let response = ConfigResponse {
         provider: config.embedding_provider.clone().unwrap_or_else(|| "ollama".to_string()),
         model: config.embedding_model.clone().unwrap_or_else(|| "nomic-embed-text".to_string()),
         base_url: config.embedding_base_url.clone(),
         has_api_key: config.api_key.is_some(),
         auto_decay: config.auto_decay_enabled.unwrap_or(true),
-    })
+    };
+    tracing::info!("API: get_config returning: {:?}", response);
+    Json(response)
 }
 
-async fn update_config(
+pub async fn update_config_handler(
     State((brain, user_config)): State<(Arc<Brain>, Arc<tokio::sync::RwLock<UserConfig>>)>,
     Json(req): Json<UpdateConfigRequest>,
 ) -> Result<Json<serde_json::Value>, String> {

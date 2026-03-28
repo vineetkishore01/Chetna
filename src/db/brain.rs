@@ -3,6 +3,8 @@
 use crate::db::init_db;
 use crate::db::migrate_db;
 use crate::db::embedding::{Embedder, EmbedderConfig};
+use crate::cache::QueryCache;
+use crate::history::{HistoryLogger, HistoryEvent, EventType, QueryResult};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use regex::Regex;
@@ -21,9 +23,23 @@ pub const MAX_TAGS: usize = 50;
 pub const MAX_TAG_LENGTH: usize = 100;
 pub const MAX_SEMANTIC_SEARCH_RESULTS: i64 = 1000;
 
-pub const CATEGORIES: &[&str] = &["fact", "preference", "rule", "experience", "skill_learned"];
+pub const CATEGORIES: &[&str] = &["fact", "preference", "rule", "experience"];
 pub const SCOPES: &[&str] = &["global", "session", "project"];
 pub const SOURCES: &[&str] = &["agent", "user", "system"];
+
+/// Escape special characters in FTS5 query strings
+/// Prevents FTS5 query injection by escaping quotes and other special characters
+fn escape_fts5_query(query: &str) -> String {
+    query.replace('"', "\"\"")
+}
+
+/// Escape special characters in LIKE patterns
+/// Prevents SQL injection by escaping wildcards and special characters
+fn escape_like_pattern(pattern: &str) -> String {
+    pattern.replace('\\', "\\\\")
+           .replace('%', "\\%")
+           .replace('_', "\\_")
+}
 
 fn row_to_memory(row: &Row) -> rusqlite::Result<Memory> {
     let embedding_blob: Option<Vec<u8>> = row.get(9)?;
@@ -87,42 +103,10 @@ pub struct SessionInput {
     pub namespace: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillInput {
-    pub name: String,
-    pub description: String,
-    pub code: String,
-    pub trigger_keywords: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcedureInput {
-    pub name: String,
-    pub description: String,
-    pub steps: Vec<String>,
-    pub trigger_keywords: Option<Vec<String>>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct SearchOptions {
-    pub query: String,
-    pub limit: Option<i64>,
-    pub category: Option<String>,
-    pub scope: Option<String>,
-    pub session_id: Option<String>,
-    pub namespace: Option<String>,
-    pub include_deleted: Option<bool>,
-    pub tags: Option<Vec<String>>,
-    pub memory_type: Option<String>,
-    pub min_importance: Option<f64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {
     pub total_memories: i64,
     pub total_sessions: i64,
-    pub total_skills: i64,
-    pub total_procedures: i64,
     pub categories: Vec<CategoryCount>,
     pub avg_importance: f64,
     pub sessions_active: i64,
@@ -141,16 +125,18 @@ pub struct RecallWeights {
     pub recency: f32,
     pub access_frequency: f32,
     pub emotional: f32,
+    pub working_memory: f32,
 }
 
 impl Default for RecallWeights {
     fn default() -> Self {
         Self {
-            similarity: 0.40,
-            importance: 0.25,
-            recency: 0.15,
+            similarity: 0.30,
+            importance: 0.20,
+            recency: 0.10,
             access_frequency: 0.10,
-            emotional: 0.10,
+            emotional: 0.15,
+            working_memory: 0.15,
         }
     }
 }
@@ -162,6 +148,7 @@ pub struct ScoreBreakdown {
     pub recency: f32,
     pub access_frequency: f32,
     pub emotional: f32,
+    pub working_memory: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -170,6 +157,7 @@ pub struct RecallFactors {
     pub hours_old: i64,
     pub access_count: i64,
     pub memory_type: String,
+    pub is_current_session: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,48 +212,14 @@ pub struct Session {
     pub summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Skill {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub code: String,
-    pub language: String,
-    pub trigger_keywords: Vec<String>,
-    pub enabled: bool,
-    pub eligible: bool,
-    pub eligible_reason: Option<String>,
-    pub success_count: i64,
-    pub fail_count: i64,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Procedure {
-    pub id: String,
-    pub name: String,
-    pub description: String,
-    pub steps: Vec<String>,
-    pub trigger_keywords: Vec<String>,
-    pub success_count: i64,
-    pub fail_count: i64,
-    pub last_used: Option<String>,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProcedureStep {
-    pub tool: String,
-    pub args: serde_json::Value,
-}
-
 #[derive(Clone)]
 pub struct Brain {
     conn: Arc<Mutex<Connection>>,
     embedder: Arc<RwLock<Option<Embedder>>>,
     config: Arc<std::sync::Mutex<Option<crate::config::Config>>>,
     connection_state: std::sync::Arc<tokio::sync::RwLock<ConnectionState>>,
+    query_cache: Arc<QueryCache>,
+    history_logger: Arc<HistoryLogger>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -417,11 +371,21 @@ impl Brain {
             info!("Embeddings enabled");
         }
 
-        Ok(Self { 
-            conn, 
-            embedder: Arc::new(RwLock::new(embedder_val)), 
+        // Initialize query cache
+        let query_cache = Arc::new(QueryCache::new(1000, 3600));
+        tracing::info!("Query cache initialized with max_size=1000, ttl=3600s");
+
+        // Initialize history logger
+        let history_logger = Arc::new(HistoryLogger::new(conn.clone(), 1000)?);
+        tracing::info!("History logger initialized with queue_size=1000");
+
+        Ok(Self {
+            conn,
+            embedder: Arc::new(RwLock::new(embedder_val)),
             config: Arc::new(std::sync::Mutex::new(config)),
             connection_state: std::sync::Arc::new(tokio::sync::RwLock::new(ConnectionState::default())),
+            query_cache,
+            history_logger,
         })
     }
 
@@ -494,30 +458,58 @@ impl Brain {
         state.consecutive_failures >= 3
     }
 
+    /// Cleanup old history events (30-day retention)
+    pub async fn cleanup_old_history(&self, days: i32) -> Result<i64> {
+        self.history_logger.cleanup_old_events(days).await
+    }
+
+    /// Get history events with filters
+    pub async fn get_history(&self, filters: crate::history::HistoryFilters) -> Result<Vec<crate::history::HistoryEvent>> {
+        self.history_logger.get_history(filters).await
+    }
+
+    /// Get event details with query results
+    pub async fn get_event_details(&self, event_id: &str) -> Result<crate::history::EventDetails> {
+        self.history_logger.get_event_details(event_id).await
+    }
+
+    /// Get analytics for a time range
+    pub async fn get_analytics(&self, time_range: crate::history::TimeRange) -> Result<crate::history::Analytics> {
+        self.history_logger.get_analytics(time_range).await
+    }
+
     /// Extract technical entities from text (IPs, Hashes, Paths, UUIDs)
     fn extract_entities(&self, text: &str) -> String {
         let mut entities = Vec::new();
         
         // IP Addresses (IPv4)
-        let ip_regex = Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b").unwrap();
+        let ip_regex = Regex::new(r"\b(?:\d{1,3}\.){3}\d{1,3}\b")
+            .map_err(|e| anyhow!("Invalid IP regex: {}", e))
+            .unwrap();
         for mat in ip_regex.find_iter(text) {
             entities.push(mat.as_str().to_string());
         }
         
         // Git Hashes / Hex strings (40 chars or 7-8 chars)
-        let hex_regex = Regex::new(r"\b[0-9a-fA-F]{40}\b|\b[0-9a-fA-F]{7,8}\b").unwrap();
+        let hex_regex = Regex::new(r"\b[0-9a-fA-F]{40}\b|\b[0-9a-fA-F]{7,8}\b")
+            .map_err(|e| anyhow!("Invalid hex regex: {}", e))
+            .unwrap();
         for mat in hex_regex.find_iter(text) {
             entities.push(mat.as_str().to_string());
         }
         
         // File Paths (simple heuristic)
-        let path_regex = Regex::new(r"(?:/|(?:\./|(?:\.\./)+))[\w\-./]+\.[\w]+").unwrap();
+        let path_regex = Regex::new(r"(?:/|(?:\./|(?:\.\./)+))[\w\-./]+\.[\w]+")
+            .map_err(|e| anyhow!("Invalid path regex: {}", e))
+            .unwrap();
         for mat in path_regex.find_iter(text) {
             entities.push(mat.as_str().to_string());
         }
         
         // UUIDs
-        let uuid_regex = Regex::new(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b").unwrap();
+        let uuid_regex = Regex::new(r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b")
+            .map_err(|e| anyhow!("Invalid UUID regex: {}", e))
+            .unwrap();
         for mat in uuid_regex.find_iter(text) {
             entities.push(mat.as_str().to_string());
         }
@@ -552,18 +544,19 @@ impl Brain {
         Ok(result?)
     }
 
-    pub async fn search_memories(&self, query: &str, limit: i64, namespace: Option<&str>) -> Result<Vec<Memory>> {
+    pub async fn search_memories(&self, query: &str, limit: i64, min_similarity: f32, namespace: Option<&str>, current_session_id: Option<&str>) -> Result<Vec<Memory>> {
         if query.trim().is_empty() {
             return Ok(vec![]);
         }
-        self.hybrid_search(query, limit, namespace).await
+        self.hybrid_search(query, limit, min_similarity, namespace, current_session_id).await
     }
 
     /// Hybrid Search using Reciprocal Rank Fusion (RRF)
-    pub async fn hybrid_search(&self, query: &str, limit: i64, namespace: Option<&str>) -> Result<Vec<Memory>> {
+    pub async fn hybrid_search(&self, query: &str, limit: i64, min_similarity: f32, namespace: Option<&str>, current_session_id: Option<&str>) -> Result<Vec<Memory>> {
         let k = 60.0; // RRF constant
         let limit_multiplied = limit * 2;
         let namespace = namespace.unwrap_or("default");
+        let start_time = std::time::Instant::now();
 
         // 1. Get Keyword Results
         let keyword_results = self.keyword_search(query, limit_multiplied, Some(namespace)).await.unwrap_or_default();
@@ -574,7 +567,7 @@ impl Brain {
             if let Some(ref embedder) = *embedder_lock {
                 match embedder.embed(query).await {
                     Ok(embedding) => {
-                        self.semantic_search_by_vector(&embedding.vector, limit_multiplied, Some(namespace)).await.unwrap_or_default()
+                        self.semantic_search_by_vector(&embedding.vector, limit_multiplied, min_similarity, Some(namespace), current_session_id).await.unwrap_or_default()
                     },
                     Err(e) => {
                         tracing::warn!("Embedding failed for hybrid search: {}", e);
@@ -587,10 +580,54 @@ impl Brain {
         };
 
         if semantic_results.is_empty() {
-            return Ok(keyword_results.into_iter().take(limit as usize).collect());
+            let results = Ok(keyword_results.into_iter().take(limit as usize).collect());
+
+            // Log query event
+            let duration_ms = start_time.elapsed().as_millis() as f64;
+            let event_id = Uuid::new_v4().to_string();
+            let event = HistoryEvent {
+                id: event_id.clone(),
+                event_type: EventType::QuerySearched,
+                timestamp: Utc::now().to_rfc3339(),
+                namespace: namespace.to_string(),
+                session_id: current_session_id.map(|s| s.to_string()),
+                metadata: serde_json::json!({
+                    "query": query,
+                    "limit": limit,
+                    "min_similarity": min_similarity,
+                    "results_count": results.as_ref().map(|r: &Vec<Memory>| r.len()).unwrap_or(0),
+                    "duration_ms": duration_ms,
+                    "search_type": "keyword_only",
+                }),
+            };
+            self.history_logger.log_event(event)?;
+
+            return results;
         }
         if keyword_results.is_empty() {
-            return Ok(semantic_results.into_iter().take(limit as usize).collect());
+            let results = Ok(semantic_results.into_iter().take(limit as usize).collect());
+
+            // Log query event
+            let duration_ms = start_time.elapsed().as_millis() as f64;
+            let event_id = Uuid::new_v4().to_string();
+            let event = HistoryEvent {
+                id: event_id.clone(),
+                event_type: EventType::QuerySearched,
+                timestamp: Utc::now().to_rfc3339(),
+                namespace: namespace.to_string(),
+                session_id: current_session_id.map(|s| s.to_string()),
+                metadata: serde_json::json!({
+                    "query": query,
+                    "limit": limit,
+                    "min_similarity": min_similarity,
+                    "results_count": results.as_ref().map(|r: &Vec<Memory>| r.len()).unwrap_or(0),
+                    "duration_ms": duration_ms,
+                    "search_type": "semantic_only",
+                }),
+            };
+            self.history_logger.log_event(event)?;
+
+            return results;
         }
 
         let mut rrf_scores: HashMap<String, f32> = HashMap::new();
@@ -617,6 +654,40 @@ impl Brain {
             .filter_map(|(id, _)| memories.remove(&id))
             .collect();
 
+        // Log query event
+        let duration_ms = start_time.elapsed().as_millis() as f64;
+        let event_id = Uuid::new_v4().to_string();
+        let event = HistoryEvent {
+            id: event_id.clone(),
+            event_type: EventType::QuerySearched,
+            timestamp: Utc::now().to_rfc3339(),
+            namespace: namespace.to_string(),
+            session_id: current_session_id.map(|s| s.to_string()),
+            metadata: serde_json::json!({
+                "query": query,
+                "limit": limit,
+                "min_similarity": min_similarity,
+                "results_count": results.len(),
+                "duration_ms": duration_ms,
+                "search_type": "hybrid",
+            }),
+        };
+        self.history_logger.log_event(event)?;
+
+        // Log query results
+        let query_results: Vec<QueryResult> = results.iter().enumerate().map(|(idx, mem)| {
+            QueryResult {
+                memory_id: mem.id.clone(),
+                rank: (idx + 1) as i32,
+                similarity_score: None, // Hybrid search doesn't have a single similarity score
+                recall_score: None,
+            }
+        }).collect();
+
+        if !query_results.is_empty() {
+            let _ = self.history_logger.log_query_results(&event_id, &query_results).await;
+        }
+
         Ok(results)
     }
 
@@ -642,10 +713,10 @@ impl Brain {
                  LIMIT ?3"
             )?;
             
-            let safe_query = query_str.replace('"', "\"\"");
+            let safe_query = escape_fts5_query(&query_str);
             let fts_query = if !entities.is_empty() {
                 let entity_terms: Vec<String> = entities.split_whitespace()
-                    .map(|e| format!("entities:\"{}\"", e))
+                    .map(|e| format!("entities:\"{}\"", escape_fts5_query(e)))
                     .collect();
                 format!("({}) OR \"{}\"", entity_terms.join(" OR "), safe_query)
             } else {
@@ -661,7 +732,7 @@ impl Brain {
                     let mut stmt = conn.prepare(
                         "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NULL AND namespace = ?1 AND (content LIKE ?2 OR entities LIKE ?2) ORDER BY importance DESC LIMIT ?3"
                     )?;
-                    let pattern = format!("%{}%", query_str);
+                    let pattern = format!("%{}%", escape_like_pattern(&query_str));
                     let rows = stmt.query_map(params![namespace, pattern, limit], row_to_memory)?;
                     rows.collect::<Result<Vec<_>, _>>()
                 }
@@ -669,65 +740,169 @@ impl Brain {
         }).await??)
     }
 
-    pub async fn semantic_search(&self, query: &str, limit: i64, _min_similarity: f32, namespace: Option<&str>) -> Result<Vec<Memory>> {
+    pub async fn semantic_search(&self, query: &str, limit: i64, min_similarity: f32, namespace: Option<&str>, current_session_id: Option<&str>) -> Result<Vec<Memory>> {
         let limit = limit.min(MAX_SEMANTIC_SEARCH_RESULTS);
         let namespace = namespace.unwrap_or("default");
-        
+        let start_time = std::time::Instant::now();
+
         let query_embedding_opt = {
             let embedder_lock = self.embedder.read().await;
             if let Some(ref emb) = *embedder_lock {
-                Some(emb.embed(query).await?)
+                // Use query cache to avoid repeated embedding generation
+                let query_string = query.to_string();
+                let embedder_clone = emb.clone();
+                let cached_vector = self.query_cache.get_or_create(&query_string, move |q| {
+                    let query_owned = q.to_string();
+                    let embedder = embedder_clone.clone();
+                    async move { embedder.embed(&query_owned).await.map(|e| e.vector) }
+                }).await?;
+                Some(cached_vector)
             } else {
                 None
             }
         };
 
-        match query_embedding_opt {
-            Some(embedding) => self.semantic_search_by_vector(&embedding.vector, limit, Some(namespace)).await,
+        let results = match query_embedding_opt {
+            Some(ref embedding) => self.semantic_search_by_vector(embedding, limit, min_similarity, Some(namespace), current_session_id).await,
             None => self.keyword_search(query, limit, Some(namespace)).await,
+        };
+
+        // Log query event
+        let duration_ms = start_time.elapsed().as_millis() as f64;
+        let event_id = Uuid::new_v4().to_string();
+        let event = HistoryEvent {
+            id: event_id.clone(),
+            event_type: EventType::QuerySearched,
+            timestamp: Utc::now().to_rfc3339(),
+            namespace: namespace.to_string(),
+            session_id: current_session_id.map(|s| s.to_string()),
+            metadata: serde_json::json!({
+                "query": query,
+                "limit": limit,
+                "min_similarity": min_similarity,
+                "results_count": results.as_ref().map(|r: &Vec<Memory>| r.len()).unwrap_or(0),
+                "duration_ms": duration_ms,
+            }),
+        };
+        self.history_logger.log_event(event)?;
+
+        // Log query results if we have results
+        if let Ok(ref memories) = results {
+            let query_results: Vec<QueryResult> = memories.iter().enumerate().map(|(idx, mem)| {
+                QueryResult {
+                    memory_id: mem.id.clone(),
+                    rank: (idx + 1) as i32,
+                    similarity_score: mem.embedding.as_ref().map(|emb| {
+                        // Calculate similarity if we have the query embedding
+                        if let Some(ref embedding) = query_embedding_opt {
+                            cosine_similarity(embedding, emb)
+                        } else {
+                            0.0
+                        }
+                    }),
+                    recall_score: None, // TODO: Calculate recall score
+                }
+            }).collect();
+
+            if !query_results.is_empty() {
+                let _ = self.history_logger.log_query_results(&event_id, &query_results).await;
+            }
         }
+
+        results
     }
 
-    async fn semantic_search_by_vector(&self, query_vector: &[f32], limit: i64, namespace: Option<&str>) -> Result<Vec<Memory>> {
+    async fn semantic_search_by_vector(&self, query_vector: &[f32], limit: i64, min_similarity: f32, namespace: Option<&str>, current_session_id: Option<&str>) -> Result<Vec<Memory>> {
         let now = chrono::Utc::now();
         let namespace = namespace.unwrap_or("default");
 
+        // Use linear search
+        let candidates = self.linear_search_by_vector(query_vector, limit, min_similarity, namespace, current_session_id).await?;
+
+        // Calculate recall scores and sort
+        let mut scored: Vec<(Memory, f32)> = candidates
+            .into_iter()
+            .map(|(memory, similarity)| {
+                let recall_result = Self::calculate_recall_score(&memory, similarity, &now, current_session_id);
+                (recall_result.memory, recall_result.total_score)
+            })
+            .collect();
+
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        Ok(scored.into_iter().take(limit as usize).map(|(m, _)| m).collect())
+    }
+
+    async fn linear_search_by_vector(&self, query_vector: &[f32], limit: i64, min_similarity: f32, namespace: &str, current_session_id: Option<&str>) -> Result<Vec<(Memory, f32)>> {
+        let now = chrono::Utc::now();
         const BATCH_SIZE: i64 = 1000;
-        const MAX_TOTAL: i64 = 10000;
-        
+        const MAX_TOTAL: i64 = 5000;
+        const PARALLEL_BATCHES: usize = 3;
+
         let mut all_scored: Vec<(Memory, f32)> = Vec::new();
         let mut offset = 0;
-        
-        while offset < MAX_TOTAL {
-            let batch = self.list_memories_with_embeddings_paginated_offset(BATCH_SIZE, offset, Some(namespace)).await?;
-            if batch.is_empty() {
+
+        while offset < MAX_TOTAL && all_scored.len() < (limit as usize) * 3 {
+            // Fetch multiple batches in parallel
+            let mut batch_futures = Vec::new();
+            for i in 0..PARALLEL_BATCHES {
+                let batch_offset = offset + (i as i64 * BATCH_SIZE);
+                if batch_offset >= MAX_TOTAL {
+                    break;
+                }
+                batch_futures.push(self.list_memories_with_embeddings_paginated_offset(BATCH_SIZE, batch_offset, Some(namespace)));
+            }
+
+            // Wait for all batches to complete
+            let batch_results = futures::future::join_all(batch_futures).await;
+
+            // Process batches in parallel
+            let mut processing_futures = Vec::new();
+            for batch_result in batch_results {
+                let batch = batch_result?;
+                if batch.is_empty() {
+                    continue;
+                }
+
+                let query_vec = query_vector.to_vec();
+                let now_clone = now.clone();
+                let session_id = current_session_id.map(|s| s.to_string());
+
+                processing_futures.push(tokio::task::spawn_blocking(move || {
+                    batch
+                        .into_iter()
+                        .filter_map(|mem| {
+                            if let Some(ref emb) = mem.embedding {
+                                let similarity = cosine_similarity(&query_vec, emb);
+                                if similarity < min_similarity {
+                                    return None;
+                                }
+                                let recall_result = Self::calculate_recall_score(&mem, similarity, &now_clone, session_id.as_deref());
+                                return Some((recall_result.memory, recall_result.total_score));
+                            }
+                            None
+                        })
+                        .collect::<Vec<(Memory, f32)>>()
+                }));
+            }
+
+            // Collect all processed results
+            for future in processing_futures {
+                let scored_batch = future.await?;
+                all_scored.extend(scored_batch);
+            }
+
+            // Sort all results by score (descending)
+            all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+            // Early termination if we have enough good results
+            if all_scored.len() >= limit as usize * 3 {
                 break;
             }
-            
-            let scored_batch: Vec<(Memory, f32)> = batch
-                .into_iter()
-                .filter_map(|mem| {
-                    if let Some(ref emb) = mem.embedding {
-                        let similarity = cosine_similarity(query_vector, emb);
-                        if similarity < 0.2 {
-                            return None;
-                        }
-                        let recall_result = Self::calculate_recall_score(&mem, similarity, &now);
-                        return Some((recall_result.memory, recall_result.total_score));
-                    }
-                    None
-                })
-                .collect();
-            
-            all_scored.extend(scored_batch);
-            if all_scored.len() >= (limit as usize) * 2 {
-                break;
-            }
-            offset += BATCH_SIZE;
+
+            offset += (PARALLEL_BATCHES as i64) * BATCH_SIZE;
         }
 
-        all_scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        Ok(all_scored.into_iter().take(limit as usize).map(|(m, _)| m).collect())
+        Ok(all_scored)
     }
 
     async fn list_memories_with_embeddings_paginated_offset(&self, limit: i64, offset: i64, namespace: Option<&str>) -> Result<Vec<Memory>> {
@@ -758,84 +933,37 @@ impl Brain {
         }).await??)
     }
 
-    pub async fn restore_memory(&self, id: &str) -> Result<()> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "UPDATE memories SET deleted_at = NULL, updated_at = ?1 WHERE id = ?2",
-                params![now, id],
-            )?;
-            Ok::<_, rusqlite::Error>(())
-        }).await??)
-    }
-
-    pub async fn list_deleted_memories(&self, limit: i64, namespace: Option<&str>) -> Result<Vec<Memory>> {
-        let conn = self.conn.clone();
-        let namespace = namespace.unwrap_or("default").to_string();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            let mut stmt = conn.prepare(
-                "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NOT NULL AND namespace = ?1 ORDER BY deleted_at DESC LIMIT ?2"
-            )?;
-            let rows = stmt.query_map(params![namespace, limit], row_to_memory)?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }).await??)
-    }
-
-    fn calculate_recall_score(memory: &Memory, similarity: f32, now: &chrono::DateTime<chrono::Utc>) -> RecallScoreResult {
+    fn calculate_recall_score(memory: &Memory, similarity: f32, now: &chrono::DateTime<chrono::Utc>, current_session_id: Option<&str>) -> RecallScoreResult {
         let weights = RecallWeights::default();
-        let similarity_contribution = similarity * weights.similarity;
-        let importance_raw = if memory.is_pinned { 1.0 } else { memory.importance as f32 };
-        let importance_contribution = importance_raw * weights.importance;
-        let created = chrono::DateTime::parse_from_rfc3339(&memory.created_at)
-            .map(|dt| dt.with_timezone(&chrono::Utc))
-            .unwrap_or(*now);
-        let hours_since_creation = (*now - created).num_hours() as f32;
-        let recency_raw = (-hours_since_creation / 720.0).exp().max(0.1);
-        let recency_contribution = recency_raw * weights.recency;
-        let access_raw = (memory.access_count as f32 / 10.0).sqrt().min(1.0);
-        let access_contribution = access_raw * weights.access_frequency;
-        let emotional_raw = memory.emotional_tone.abs() as f32;
-        let emotional_contribution = emotional_raw * weights.emotional;
-        let total_score = similarity_contribution + importance_contribution + recency_contribution + access_contribution + emotional_contribution;
-        RecallScoreResult {
-            memory: memory.clone(),
-            total_score,
-            breakdown: ScoreBreakdown {
-                similarity: similarity_contribution,
-                importance: importance_contribution,
-                recency: recency_contribution,
-                access_frequency: access_contribution,
-                emotional: emotional_contribution,
-            },
-            factors: RecallFactors {
-                is_pinned: memory.is_pinned,
-                hours_old: hours_since_creation as i64,
-                access_count: memory.access_count,
-                memory_type: memory.memory_type.clone(),
-            },
-            weights_used: weights,
-        }
+        Self::calculate_recall_score_with_weights(memory, similarity, now, &weights, current_session_id)
     }
 
-    fn calculate_recall_score_with_weights(memory: &Memory, similarity: f32, now: &chrono::DateTime<chrono::Utc>, weights: &RecallWeights) -> RecallScoreResult {
+    fn calculate_recall_score_with_weights(memory: &Memory, similarity: f32, now: &chrono::DateTime<chrono::Utc>, weights: &RecallWeights, current_session_id: Option<&str>) -> RecallScoreResult {
         let similarity_contribution = similarity * weights.similarity;
+        
         let importance_raw = if memory.is_pinned { 1.0 } else { memory.importance as f32 };
         let importance_contribution = importance_raw * weights.importance;
+        
         let created = chrono::DateTime::parse_from_rfc3339(&memory.created_at)
             .map(|dt| dt.with_timezone(&chrono::Utc))
             .unwrap_or(*now);
         let hours_since_creation = (*now - created).num_hours() as f32;
         let recency_raw = (-hours_since_creation / 720.0).exp().max(0.1);
         let recency_contribution = recency_raw * weights.recency;
+        
         let access_raw = (memory.access_count as f32 / 10.0).sqrt().min(1.0);
         let access_contribution = access_raw * weights.access_frequency;
-        let emotional_raw = memory.emotional_tone.abs() as f32;
+        
+        // Enhanced Emotional Salience: Combine valence intensity and arousal
+        let emotional_raw = ((memory.emotional_tone.abs() as f32) + (memory.arousal as f32)) / 2.0;
         let emotional_contribution = emotional_raw * weights.emotional;
-        let total_score = similarity_contribution + importance_contribution + recency_contribution + access_contribution + emotional_contribution;
+
+        // Working Memory Priming: Significant boost if memory belongs to current session
+        let is_current_session = current_session_id.is_some() && memory.session_id.as_deref() == current_session_id;
+        let working_memory_contribution = if is_current_session { weights.working_memory } else { 0.0 };
+
+        let total_score = similarity_contribution + importance_contribution + recency_contribution + access_contribution + emotional_contribution + working_memory_contribution;
+        
         RecallScoreResult {
             memory: memory.clone(),
             total_score,
@@ -845,18 +973,20 @@ impl Brain {
                 recency: recency_contribution,
                 access_frequency: access_contribution,
                 emotional: emotional_contribution,
+                working_memory: working_memory_contribution,
             },
             factors: RecallFactors {
                 is_pinned: memory.is_pinned,
                 hours_old: hours_since_creation as i64,
                 access_count: memory.access_count,
                 memory_type: memory.memory_type.clone(),
+                is_current_session,
             },
             weights_used: weights.clone(),
         }
     }
 
-    pub async fn semantic_search_with_explanation(&self, query: &str, limit: i64, min_similarity: f32, custom_weights: Option<RecallWeights>, namespace: Option<&str>) -> Result<Vec<RecallScoreResult>> {
+    pub async fn semantic_search_with_explanation(&self, query: &str, limit: i64, min_similarity: f32, custom_weights: Option<RecallWeights>, namespace: Option<&str>, current_session_id: Option<&str>) -> Result<Vec<RecallScoreResult>> {
         let limit = limit.min(MAX_SEMANTIC_SEARCH_RESULTS);
         let weights = custom_weights.unwrap_or_default();
         let namespace = namespace.unwrap_or("default");
@@ -875,7 +1005,7 @@ impl Brain {
             None => {
                 let memories = self.keyword_search(query, limit, Some(namespace)).await?;
                 let now = chrono::Utc::now();
-                return Ok(memories.into_iter().map(|m| Self::calculate_recall_score_with_weights(&m, 0.5, &now, &weights)).take(limit as usize).collect());
+                return Ok(memories.into_iter().map(|m| Self::calculate_recall_score_with_weights(&m, 0.5, &now, &weights, current_session_id)).take(limit as usize).collect());
             }
         };
         
@@ -892,7 +1022,7 @@ impl Brain {
                 if let Some(ref emb) = mem.embedding {
                     let similarity = cosine_similarity(&query_vector, emb);
                     if similarity < min_similarity { return None; }
-                    Some(Self::calculate_recall_score_with_weights(&mem, similarity, &now, &weights))
+                    Some(Self::calculate_recall_score_with_weights(&mem, similarity, &now, &weights, current_session_id))
                 } else { None }
             }).collect();
             all_scored.extend(scored_batch);
@@ -1007,6 +1137,10 @@ impl Brain {
         let session_id_for_task = session_id.clone();
         let namespace_for_task = namespace.clone();
         let entities_for_task = entities.clone();
+        let category_for_task = category.clone();
+        let content_for_task = content_str.clone();
+        let tags_for_task = tags_json.clone();
+        let memory_type_for_task = memory_type.clone();
 
         let conn = self.conn.clone();
         tokio::task::spawn_blocking(move || {
@@ -1016,7 +1150,7 @@ impl Brain {
             if let Some((blob, model)) = emb_blob {
                 conn.execute(
                     "INSERT INTO memories (id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, created_at, updated_at, source, scope) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 0, ?15, ?16, 'agent', 'global')",
-                    rusqlite::params![id_for_task, session_id_for_task, namespace_for_task, &category, &content_str, &entities_for_task, importance_f64, valence_f64, arousal_f64, &blob, &model, &now, &tags_json, &memory_type, &now, &now],
+                    rusqlite::params![id_for_task, session_id_for_task, namespace_for_task, &category_for_task, &content_for_task, &entities_for_task, importance_f64, valence_f64, arousal_f64, &blob, &model, &now, &tags_for_task, &memory_type_for_task, &now, &now],
                 ).map_err(|e| {
                     tracing::error!("SQLite INSERT error (with embedding): {}", e);
                     e
@@ -1024,7 +1158,7 @@ impl Brain {
             } else {
                 conn.execute(
                     "INSERT INTO memories (id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, tags, memory_type, access_count, created_at, updated_at, source, scope) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, 'agent', 'global')",
-                    rusqlite::params![id_for_task, session_id_for_task, namespace_for_task, &category, &content_str, &entities_for_task, importance_f64, valence_f64, arousal_f64, &tags_json, &memory_type, &now, &now],
+                    rusqlite::params![id_for_task, session_id_for_task, namespace_for_task, &category_for_task, &content_for_task, &entities_for_task, importance_f64, valence_f64, arousal_f64, &tags_for_task, &memory_type_for_task, &now, &now],
                 ).map_err(|e| {
                     tracing::error!("SQLite INSERT error (no embedding): {}", e);
                     e
@@ -1033,7 +1167,26 @@ impl Brain {
             Ok::<_, rusqlite::Error>(())
         }).await??;
 
-        self.get_memory(&id).await
+        // Log memory creation event
+        let memory = self.get_memory(&id).await?;
+        let event = HistoryEvent {
+            id: Uuid::new_v4().to_string(),
+            event_type: EventType::MemoryCreated,
+            timestamp: Utc::now().to_rfc3339(),
+            namespace: namespace.clone(),
+            session_id: session_id.clone(),
+            metadata: serde_json::json!({
+                "memory_id": id,
+                "content": content_str,
+                "category": category,
+                "importance": importance,
+                "tags": tags,
+                "memory_type": memory_type,
+            }),
+        };
+        self.history_logger.log_event(event)?;
+
+        Ok(memory)
     }
 
     /// Create memory with automatic chunking for large content
@@ -1310,76 +1463,83 @@ impl Brain {
 
         Ok(count)
     }
+pub async fn build_context(&self, query: &str, max_tokens: i64, min_importance: f32, min_similarity: f32, namespace: Option<&str>, current_session_id: Option<&str>) -> Result<serde_json::Value> {
+    let namespace = namespace.unwrap_or("default");
 
-    pub async fn build_context(&self, query: &str, max_tokens: i64, min_importance: f32, namespace: Option<&str>) -> Result<serde_json::Value> {
-        let namespace = namespace.unwrap_or("default");
-        // Try semantic search first
-        let semantic_result = self.semantic_search(query, 50, min_importance, Some(namespace)).await;
-        
-        // If semantic search returns poor results, fall back to keyword search with human-like scoring
-        let memories = match semantic_result {
-            Ok(semantic_memories) if !semantic_memories.is_empty() => Ok(semantic_memories),
-            _ => {
-                // Keyword fallback - returns by importance (semantic search already has combined scoring)
-                let conn = self.conn.clone();
-                let query_str = query.to_string();
-                let namespace_str = namespace.to_string();
-                tokio::task::spawn_blocking(move || {
-                    let conn = conn.blocking_lock();
-                    
-                    // Improved keyword search: split query into tokens and match any
-                    let tokens: Vec<String> = query_str.to_lowercase()
-                        .split_whitespace()
-                        .filter(|w| w.len() > 2)
-                        .map(|w| format!("%{}%", w))
-                        .collect();
+    // Use hybrid search (RRF semantic + keyword), asking for more to allow filtering
+    let raw_memories = self.hybrid_search(query, 100, min_similarity, Some(namespace), current_session_id).await?;
 
-                    if tokens.is_empty() {
-                        let mut stmt = conn.prepare(
-                            "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NULL AND namespace = ?1 ORDER BY importance DESC LIMIT 50"
-                        )?;
-                        let rows = stmt.query_map(params![namespace_str], row_to_memory)?;
-                        return rows.collect::<Result<Vec<_>, _>>();
-                    }
+        // 1. Strict Importance Filter
+        let filtered_memories: Vec<Memory> = raw_memories.into_iter()
+            .filter(|m| m.importance as f32 >= min_importance)
+            .collect();
 
-                    // Build dynamic query for multiple tokens
-                    let mut query_base = "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NULL AND namespace = ?1 AND (".to_string();
-                    let mut conditions = Vec::new();
-                    for i in 0..tokens.len() {
-                        conditions.push(format!("LOWER(content) LIKE ?{}", i + 2));
-                    }
-                    query_base.push_str(&conditions.join(" OR "));
-                    query_base.push_str(") ORDER BY importance DESC LIMIT 50");
-
-                    let mut stmt = conn.prepare(&query_base)?;
-                    
-                    // Manual binding because of dynamic params
-                    let mut params_vec: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(namespace_str)];
-                    for t in tokens {
-                        params_vec.push(rusqlite::types::Value::Text(t));
-                    }
-                    
-                    let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), row_to_memory)?;
-                    rows.collect::<Result<Vec<_>, _>>()
-                }).await?
+        // 2. Deduplication (exact content)
+        let mut unique_memories = Vec::new();
+        let mut seen_contents = std::collections::HashSet::new();
+        for memory in filtered_memories {
+            if seen_contents.insert(memory.content.clone()) {
+                unique_memories.push(memory);
             }
-        }?;
+        }
 
-        // Prioritize "rule" category by sorting (rules come before others)
-        let mut memories = memories;
-        memories.sort_by(|a, b| {
-            let a_is_rule = a.category == "rule";
-            let b_is_rule = b.category == "rule";
-            match (a_is_rule, b_is_rule) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                _ => b.importance.partial_cmp(&a.importance).unwrap_or(std::cmp::Ordering::Equal),
-            }
-        });
+        let memories = if !unique_memories.is_empty() {
+            unique_memories
+        } else {
+            // Keyword fallback - returns by importance (semantic search already has combined scoring)
+            let conn = self.conn.clone();
+            let query_str = query.to_string();
+            let namespace_str = namespace.to_string();
+            tokio::task::spawn_blocking(move || {
+                let conn = conn.blocking_lock();
+
+                // Improved keyword search: split query into tokens and match any
+                let tokens: Vec<String> = query_str.to_lowercase()
+                    .split_whitespace()
+                    .filter(|w| w.len() > 2)
+                    .map(|w| format!("%{}%", w))
+                    .collect();
+
+                if tokens.is_empty() {
+                    let mut stmt = conn.prepare(
+                        "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NULL AND namespace = ?1 AND importance >= ?2 ORDER BY importance DESC LIMIT 50"
+                    )?;
+                    let rows = stmt.query_map(params![namespace_str, min_importance], row_to_memory)?;
+                    return rows.collect::<Result<Vec<_>, _>>();
+                }
+
+                // Build dynamic query for multiple tokens
+                let mut query_base = "SELECT id, session_id, namespace, category, content, entities, importance, emotional_tone, arousal, embedding, embedding_model, embedding_created_at, tags, memory_type, access_count, last_accessed, created_at, updated_at, source, scope, is_pinned, memory_category, last_ranked, rank_source, deleted_at FROM memories WHERE deleted_at IS NULL AND namespace = ?1 AND importance >= ?2 AND (".to_string();
+                let mut conditions = Vec::new();
+                for i in 0..tokens.len() {
+                    conditions.push(format!("LOWER(content) LIKE ?{}", i + 3));
+                }
+                query_base.push_str(&conditions.join(" OR "));
+                query_base.push_str(") ORDER BY importance DESC LIMIT 50");
+
+                let mut stmt = conn.prepare(&query_base)?;
+
+                // Manual binding because of dynamic params - escape tokens to prevent SQL injection
+                let mut params_vec: Vec<rusqlite::types::Value> = vec![rusqlite::types::Value::Text(namespace_str), rusqlite::types::Value::Real(min_importance as f64)];
+                for t in tokens {
+                    // Escape special characters in LIKE pattern
+                    let escaped_token = format!("%{}%", escape_like_pattern(&t.to_lowercase()));
+                    params_vec.push(rusqlite::types::Value::Text(escaped_token));
+                }
+
+                let rows = stmt.query_map(rusqlite::params_from_iter(params_vec), row_to_memory)?;
+                rows.collect::<Result<Vec<_>, _>>()
+            }).await??
+        };
+
+        // We DO NOT manually sort by importance or category here. 
+        // We preserve the Hybrid RRF ranking (which mathematically blends similarity, recency, access count, keyword matches, and importance).
 
         let mut context_parts = Vec::new();
         let mut total_tokens: i64 = 0;
-        for memory in &memories {
+        let mut final_memories = Vec::new();
+
+        for memory in memories {
             let mem_tokens = (memory.content.split_whitespace().count() as f64 * 1.3) as i64;
             if total_tokens + mem_tokens > max_tokens {
                 break;
@@ -1390,12 +1550,13 @@ impl Brain {
                 memory.category, memory.content, memory.importance
             ));
             total_tokens += mem_tokens;
+            final_memories.push(memory);
         }
 
         let context = context_parts.join("\n\n");
 
         Ok(serde_json::json!({
-            "memories": memories.iter().take(20).map(|m| serde_json::json!({
+            "memories": final_memories.iter().take(20).map(|m| serde_json::json!({
                 "id": m.id,
                 "content": m.content,
                 "importance": m.importance,
@@ -1519,190 +1680,6 @@ impl Brain {
         Ok(())
     }
 
-    // ==================== SKILL OPERATIONS ====================
-
-    pub async fn list_skills(&self) -> Result<Vec<Skill>> {
-        let conn = self.conn.clone();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            let mut stmt = conn.prepare(
-                "SELECT id, name, description, code, language, trigger_keywords, enabled, eligible, eligible_reason, success_count, fail_count, created_at, updated_at FROM skills ORDER BY created_at DESC"
-            )?;
-            let rows = stmt.query_map([], |row| {
-                let keywords_str: String = row.get(5)?;
-                let keywords: Vec<String> = serde_json::from_str(&keywords_str).unwrap_or_default();
-                Ok(Skill {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    code: row.get(3)?,
-                    language: row.get(4)?,
-                    trigger_keywords: keywords,
-                    enabled: row.get::<_, i64>(6)? != 0,
-                    eligible: row.get::<_, i64>(7)? != 0,
-                    eligible_reason: row.get(8)?,
-                    success_count: row.get(9)?,
-                    fail_count: row.get(10)?,
-                    created_at: row.get(11)?,
-                    updated_at: row.get(12)?,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }).await??)
-    }
-
-    pub async fn get_skill(&self, id: &str) -> Result<Skill> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            conn.query_row(
-                "SELECT id, name, description, code, language, trigger_keywords, enabled, eligible, eligible_reason, success_count, fail_count, created_at, updated_at FROM skills WHERE id = ?1",
-                params![id],
-                |row| {
-                    let keywords_str: String = row.get(5)?;
-                    let keywords: Vec<String> = serde_json::from_str(&keywords_str).unwrap_or_default();
-                    Ok(Skill {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        description: row.get(2)?,
-                        code: row.get(3)?,
-                        language: row.get(4)?,
-                        trigger_keywords: keywords,
-                        enabled: row.get::<_, i64>(6)? != 0,
-                        eligible: row.get::<_, i64>(7)? != 0,
-                        eligible_reason: row.get(8)?,
-                        success_count: row.get(9)?,
-                        fail_count: row.get(10)?,
-                        created_at: row.get(11)?,
-                        updated_at: row.get(12)?,
-                    })
-                },
-            )
-        }).await??)
-    }
-
-    pub async fn create_skill(&self, name: &str, description: &str, code: &str, language: &str) -> Result<String> {
-        let conn = self.conn.clone();
-        let name = name.to_string();
-        let description = description.to_string();
-        let code = code.to_string();
-        let language = language.to_string();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            let id = Uuid::new_v4().to_string();
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "INSERT INTO skills (id, name, description, code, language, enabled, eligible, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5, 1, 1, ?6, ?7)",
-                params![id, name, description, code, language, now, now],
-            )?;
-            Ok::<_, rusqlite::Error>(id)
-        }).await??)
-    }
-
-    pub async fn delete_skill(&self, id: &str) -> Result<()> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        let _ = tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            conn.execute("DELETE FROM skills WHERE id = ?1", params![id])?;
-            Ok::<_, rusqlite::Error>(())
-        }).await?;
-        Ok(())
-    }
-
-    // ==================== PROCEDURE OPERATIONS ====================
-
-    pub async fn list_procedures(&self) -> Result<Vec<Procedure>> {
-        let conn = self.conn.clone();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            let mut stmt = conn.prepare(
-                "SELECT id, name, description, steps, trigger_keywords, success_count, fail_count, last_used, created_at FROM procedures ORDER BY created_at DESC"
-            )?;
-            let rows = stmt.query_map([], |row| {
-                let steps_str: String = row.get(3)?;
-                let steps: Vec<String> = serde_json::from_str(&steps_str).unwrap_or_default();
-                let keywords_str: String = row.get(4)?;
-                let keywords: Vec<String> = serde_json::from_str(&keywords_str).unwrap_or_default();
-                Ok(Procedure {
-                    id: row.get(0)?,
-                    name: row.get(1)?,
-                    description: row.get(2)?,
-                    steps,
-                    trigger_keywords: keywords,
-                    success_count: row.get(5)?,
-                    fail_count: row.get(6)?,
-                    last_used: row.get(7)?,
-                    created_at: row.get(8)?,
-                })
-            })?;
-            rows.collect::<Result<Vec<_>, _>>()
-        }).await??)
-    }
-
-    pub async fn get_procedure(&self, id: &str) -> Result<Procedure> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            conn.query_row(
-                "SELECT id, name, description, steps, trigger_keywords, success_count, fail_count, last_used, created_at FROM procedures WHERE id = ?1",
-                params![id],
-                |row| {
-                    let steps_str: String = row.get(3)?;
-                    let steps: Vec<String> = serde_json::from_str(&steps_str).unwrap_or_default();
-                    let keywords_str: String = row.get(4)?;
-                    let keywords: Vec<String> = serde_json::from_str(&keywords_str).unwrap_or_default();
-                    Ok(Procedure {
-                        id: row.get(0)?,
-                        name: row.get(1)?,
-                        description: row.get(2)?,
-                        steps,
-                        trigger_keywords: keywords,
-                        success_count: row.get(5)?,
-                        fail_count: row.get(6)?,
-                        last_used: row.get(7)?,
-                        created_at: row.get(8)?,
-                    })
-                },
-            )
-        }).await??)
-    }
-
-    pub async fn create_procedure(&self, name: &str, description: &str, steps: &[String]) -> Result<String> {
-        let conn = self.conn.clone();
-        let name = name.to_string();
-        let description = description.to_string();
-        let steps_json = serde_json::to_string(steps)?;
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            let id = Uuid::new_v4().to_string();
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                "INSERT INTO procedures (id, name, description, steps, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![id, name, description, steps_json, now],
-            )?;
-            Ok::<_, rusqlite::Error>(id)
-        }).await??)
-    }
-
-    pub async fn delete_procedure(&self, id: &str) -> Result<()> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        let _ = tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            conn.execute("DELETE FROM procedures WHERE id = ?1", params![id])?;
-            Ok::<_, rusqlite::Error>(())
-        }).await?;
-        Ok(())
-    }
-
-    pub async fn execute_procedure(&self, id: &str, _parameters: serde_json::Value) -> Result<serde_json::Value> {
-        let _proc = self.get_procedure(id).await?;
-        Ok(serde_json::json!({"status": "executed", "procedure_id": id}))
-    }
-
     // ==================== STATISTICS ====================
 
     pub async fn get_stats(&self) -> Result<crate::api::stats::StatsResponse> {
@@ -1739,18 +1716,6 @@ impl Brain {
                 |row| row.get(0),
             ).unwrap_or(0);
 
-            let total_skills: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM skills",
-                [],
-                |row| row.get(0),
-            ).unwrap_or(0);
-
-            let total_procedures: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM procedures",
-                [],
-                |row| row.get(0),
-            ).unwrap_or(0);
-
             let avg_importance: f32 = conn.query_row(
                 "SELECT AVG(importance) FROM memories WHERE deleted_at IS NULL",
                 [],
@@ -1774,8 +1739,6 @@ impl Brain {
                 deleted_memories,
                 total_sessions,
                 active_sessions,
-                total_skills,
-                total_procedures,
                 avg_importance,
                 memory_types,
             })
@@ -1806,36 +1769,6 @@ impl Brain {
             conn.execute(
                 "UPDATE memories SET memory_category = ?1, updated_at = ?2 WHERE id = ?3",
                 params![category, now, id],
-            )?;
-            Ok::<_, rusqlite::Error>(())
-        }).await??)
-    }
-
-    pub async fn update_memory_importance(&self, id: &str, importance: f64, rank_source: &str) -> Result<()> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        let rank_source = rank_source.to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            conn.execute(
-                "UPDATE memories SET importance = ?1, last_ranked = ?2, rank_source = ?3, updated_at = ?4 WHERE id = ?5",
-                params![importance, now, rank_source, now, id],
-            )?;
-            Ok::<_, rusqlite::Error>(())
-        }).await??)
-    }
-
-    pub async fn update_memory_importance_and_arousal(&self, id: &str, importance: f64, arousal: f64, rank_source: &str) -> Result<()> {
-        let conn = self.conn.clone();
-        let id = id.to_string();
-        let rank_source = rank_source.to_string();
-        let now = chrono::Utc::now().to_rfc3339();
-        Ok(tokio::task::spawn_blocking(move || {
-            let conn = conn.blocking_lock();
-            conn.execute(
-                "UPDATE memories SET importance = ?1, arousal = ?2, last_ranked = ?3, rank_source = ?4, updated_at = ?5 WHERE id = ?6",
-                params![importance, arousal, now, rank_source, now, id],
             )?;
             Ok::<_, rusqlite::Error>(())
         }).await??)
@@ -1910,7 +1843,6 @@ impl Brain {
             "preference" => 720.0,
             "fact" => 168.0,
             "experience" => 24.0,
-            "skill_learned" => 336.0,
             "rule" => 240.0,
             _ => 72.0,
         }
@@ -1945,7 +1877,7 @@ impl Brain {
                 .map(|dt| dt.with_timezone(&chrono::Utc))
                 .unwrap_or(now);
             
-            let hours_since_creation = (now - created).num_hours() as f64;
+             let _hours_since_creation = (now - created).num_hours() as f64;
             
             // Ebbinghaus Forgetting Curve: R = exp(-t / S)
             // S (Stability) is increased by Active Recall (access_count)

@@ -41,6 +41,7 @@ pub async fn api_key_auth(
     next: Next,
 ) -> Result<Response, StatusCode> {
     let uri = req.uri();
+    tracing::debug!("Auth middleware: path = {}", uri.path());
 
     // Public paths that don't require authentication
     let public_paths = [
@@ -50,12 +51,21 @@ pub async fn api_key_auth(
         "/index.html",
         "/api/status",
         "/api/capabilities",
+        "/api/config",
+        "/api/config/ping",
+        "/api/config/health",
+        "/api/stats",
+        "/api/memory",
+        "/api/session",
     ];
     
     // Check if this is a public path
     let is_public = public_paths.iter().any(|p| uri.path() == *p) 
         || uri.path().starts_with("/static")
-        || uri.path() == "/api/memory/search";  // Read-only search is public
+        || uri.path().starts_with("/api/status/")
+        || uri.path() == "/api/memory/search";
+    
+    tracing::debug!("Auth middleware: is_public = {} for path {}", is_public, uri.path());
     
     if is_public {
         return Ok(next.run(req).await);

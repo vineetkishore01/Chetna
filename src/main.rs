@@ -23,6 +23,7 @@ async fn main() -> Result<()> {
     info!("🧠 Starting Chetna Memory System");
     info!("   Host: {}:{}", config.host, config.port);
     info!("   Database: {}", config.db_path);
+    info!("   Auth required: {}", std::env::var("CHETNA_AUTH_REQUIRED").unwrap_or("false".to_string()));
 
     // Create application state
     let state = AppState::new(config.clone())?;

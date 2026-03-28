@@ -16,7 +16,7 @@ tower = "0.4"
 tower-http = { version = "0.6", features = ["cors", "fs"] }
 
 # Database
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.34", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
@@ -51,6 +51,9 @@ lru = "0.13"
 # Async LRU cache
 futures = "0.3"
 futures-util = "0.3"
+
+# Vector indexing (HNSW - to be implemented)
+# fast-hnsw = "1.0"
 
 [dev-dependencies]
 tokio-test = "0.4"
